@@ -59,7 +59,7 @@ def _save_savedmodel(model, path: str):
 
 def test_convert_infers_architecture(tmp_path):
     """Converter correctly infers num_blocks, model_dim, output_dims from the Keras model."""
-    from torch_promoterai.utils import convert_tf_weights
+    from promoterai_torch.utils import convert_tf_weights
 
     model = _build_tf_keras_model(num_blocks=8, model_dim=16, output_dims=(8,))
     model_path = str(tmp_path / "keras_model")
@@ -76,7 +76,7 @@ def test_convert_infers_architecture(tmp_path):
 
 def test_convert_loads_cleanly(tmp_path):
     """Converted checkpoint loads into PromoterAI without missing keys."""
-    from torch_promoterai.utils import convert_tf_weights, load_pretrained
+    from promoterai_torch.utils import convert_tf_weights, load_pretrained
 
     model = _build_tf_keras_model(num_blocks=8, model_dim=16, output_dims=(8,))
     model_path = str(tmp_path / "keras_model")
@@ -97,7 +97,7 @@ def test_convert_loads_cleanly(tmp_path):
 
 def test_convert_numerical_parity(tmp_path):
     """PyTorch and Keras models produce numerically matching outputs after weight conversion."""
-    from torch_promoterai.utils import convert_tf_weights, load_pretrained
+    from promoterai_torch.utils import convert_tf_weights, load_pretrained
 
     input_len = 64
     keras_model = _build_tf_keras_model(num_blocks=8, model_dim=16, output_dims=(8,))

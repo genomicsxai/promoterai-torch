@@ -18,9 +18,9 @@ import pyfaidx
 import torch
 from torch.utils.data import DataLoader
 
-from torch_promoterai.architecture import TwinModel
-from torch_promoterai.dataset import VariantDataset
-from torch_promoterai.utils import load_pretrained
+from promoterai_torch.architecture import TwinModel
+from promoterai_torch.dataset import VariantDataset
+from promoterai_torch.utils import load_pretrained
 
 
 def _collate_variant(batch):

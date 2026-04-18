@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "torch-promoterai"
+name = "promoterai-torch"
 version = "1.0.0"
 requires-python = ">=3.10"
 dependencies = [
@@ -22,10 +22,12 @@ train = ["h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3"]
 dev = ["pytest>=8", "h5py>=3.0", "scipy>=1.10"]
 
 [project.scripts]
-promoterai-torch = "torch_promoterai.cli:main"
+promoterai-torch = "promoterai_torch.cli:main"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 exclude = ["tests*", "PromoterAI*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]

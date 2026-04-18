@@ -2,10 +2,10 @@
 Multi-GPU training script (torchrun-compatible).
 
 Single-GPU:
-    python -m torch_promoterai.train [args]
+    python -m promoterai_torch.train [args]
 
 Multi-GPU:
-    torchrun --nproc_per_node=4 -m torch_promoterai.train [args]
+    torchrun --nproc_per_node=4 -m promoterai_torch.train [args]
 """
 
 import argparse
@@ -18,9 +18,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 
-from torch_promoterai.architecture import PromoterAI
-from torch_promoterai.dataset import SequenceDataset, build_weighted_dataloader
-from torch_promoterai.utils import (
+from promoterai_torch.architecture import PromoterAI
+from promoterai_torch.dataset import SequenceDataset, build_weighted_dataloader
+from promoterai_torch.utils import (
     CSVLogger,
     WeightDecayScheduler,
     make_lr_lambda,

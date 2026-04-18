@@ -67,7 +67,7 @@ def save_checkpoint(
 
 def load_pretrained(checkpoint_path: str, map_location: str = "cpu"):
     """Load a checkpoint and reconstruct PromoterAI. Returns (model, args_dict)."""
-    from torch_promoterai.architecture import PromoterAI
+    from promoterai_torch.architecture import PromoterAI
 
     ckpt = torch.load(checkpoint_path, map_location=map_location)
     args = ckpt["args"]
@@ -123,7 +123,7 @@ def convert_tf_weights(
             "Install with: pip install tensorflow-cpu tf-keras"
         )
 
-    from torch_promoterai.architecture import PromoterAI
+    from promoterai_torch.architecture import PromoterAI
 
     print(f"Loading Keras model from {keras_model_path} ...")
     keras_model = tf_keras.models.load_model(keras_model_path)

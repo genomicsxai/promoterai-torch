@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch-promoterai"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.20",
+    "pandas>=2.0",
+    "pyfaidx>=0.8",
+    "tqdm>=4.0",
+    "tensorflow-cpu; sys_platform != 'darwin'",
+    "tensorflow; sys_platform == 'darwin'",
+    "tf-keras",
+]
+
+[project.optional-dependencies]
+train = ["h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3"]
+dev = ["pytest>=8", "h5py>=3.0", "scipy>=1.10"]
+
+[project.scripts]
+promoterai-torch = "torch_promoterai.cli:main"
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "PromoterAI*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

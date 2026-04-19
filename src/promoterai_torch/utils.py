@@ -78,6 +78,7 @@ def load_pretrained(checkpoint_path: str, map_location: str = "cpu"):
         output_crop=args["output_crop"]
         if "output_crop" in args
         else args["input_length"] - args["output_length"],
+        shortcut_layer_freq=args.get("shortcut_layer_freq", 4),
     )
     model.load_state_dict(ckpt["model_state_dict"])
     return model, args
@@ -109,12 +110,19 @@ def convert_tf_weights(
     """
     Convert a pretrained PromoterAI Keras SavedModel to a PyTorch checkpoint.
 
-    Architecture parameters (num_blocks, model_dim, output_dims, output_crop) are
-    inferred automatically from the Keras model. input_length and output_length are
-    optional metadata stored in the checkpoint for convenience.
+    Architecture (num_blocks, model_dim, output_dims, shortcut_layer_freq) is inferred
+    from weight names. output_crop is derived from input_length - output_length when
+    both are provided. input_length and output_length are stored as metadata.
 
-    Requires tensorflow: pip install 'torch-promoterai[convert]'
+    Expected weight naming (subclassed model format used by Illumina):
+      dense/kernel, dense/bias                          — stem
+      meta_former_block[_N]/depthwise_conv1d/...        — block dw conv
+      meta_former_block[_N]/batch_normalization[_1]/... — block BN (bn1, bn2)
+      meta_former_block[_N]/dense[_1]/...               — block FFN
+      shortcut_{species}{block_num}/kernel|bias         — output head projections
     """
+    import re
+
     try:
         import tf_keras
     except ImportError:
@@ -128,52 +136,51 @@ def convert_tf_weights(
     print(f"Loading Keras model from {keras_model_path} ...")
     keras_model = tf_keras.models.load_model(keras_model_path)
 
-    # ── Infer architecture from layer class names (type-agnostic across TF versions) ──
-    def _cls(lay) -> str:
-        return type(lay).__name__
+    # Flat weight dict: strip trailing ':0' from TF variable names
+    w = {v.name.rstrip(":0"): v.numpy() for v in keras_model.weights}
 
-    conv_layers = [lay for lay in keras_model.layers if _cls(lay) == "Conv1D"]
-    bn_layers = [lay for lay in keras_model.layers if _cls(lay) == "BatchNormalization"]
-    dw_layers = [lay for lay in keras_model.layers if _cls(lay) == "DepthwiseConv1D"]
-    all_dense = [lay for lay in keras_model.layers if _cls(lay) == "Dense"]
-    crop_layers = [lay for lay in keras_model.layers if _cls(lay) == "Cropping1D"]
-
-    # Dense layers whose names start with 'output{j}_' are output head projections
-    output_dense = [
-        lay for lay in all_dense if lay.name.split("_")[0].startswith("output")
-    ]
-    ffn_dense = [lay for lay in all_dense if lay not in output_dense]
-
-    if not conv_layers:
-        raise ValueError("Could not find Conv1D stem layer in the Keras model.")
-    if not dw_layers:
+    # ── Infer architecture ────────────────────────────────────────────────────
+    if "dense/kernel" not in w:
         raise ValueError(
-            "Could not find DepthwiseConv1D layers — is this a PromoterAI model?"
+            "No 'dense/kernel' stem weight found. Is this a PromoterAI subclassed model?"
         )
+    model_dim = w["dense/bias"].shape[0]
 
-    num_blocks = len(dw_layers)
-    model_dim = conv_layers[0].filters
-
-    # Group output head Denses by head index (j in 'output{j}_{layer_idx}')
-    import re
-
-    head_groups: dict[int, list] = {}
-    for layer in output_dense:
-        m = re.match(r"^output(\d+)_", layer.name)
+    block_idx_set: set[int] = set()
+    for name in w:
+        m = re.match(r"^meta_former_block(?:_(\d+))?/", name)
         if m:
-            j = int(m.group(1))
-            head_groups.setdefault(j, []).append(layer)
-    if not head_groups:
-        raise ValueError(
-            "Could not find output head Dense layers named 'output{j}_{i}'."
-        )
+            block_idx_set.add(int(m.group(1)) if m.group(1) else 0)
+    if not block_idx_set:
+        raise ValueError("No MetaFormerBlock weights found — is this a PromoterAI model?")
+    num_blocks = max(block_idx_set) + 1
 
-    output_dims = [head_groups[j][0].units for j in sorted(head_groups)]
-    output_crop = crop_layers[0].cropping[0] * 2 if crop_layers else 0
+    # Collect shortcut projections: shortcut_{species}{block_num}/kernel
+    shortcut_pat = re.compile(r"^shortcut_([a-zA-Z]+)(\d+)/kernel$")
+    species_order: list[str] = []
+    species_blocks: dict[str, list[int]] = {}
+    for name in keras_model.weights:  # iterate in model weight order to preserve species order
+        m = shortcut_pat.match(name.name.rstrip(":0"))
+        if m:
+            species, block_num = m.group(1), int(m.group(2))
+            if species not in species_order:
+                species_order.append(species)
+                species_blocks[species] = []
+            if block_num not in species_blocks[species]:
+                species_blocks[species].append(block_num)
+    if not species_order:
+        raise ValueError("No shortcut_{species}{N} output head weights found.")
+
+    output_dims = [w[f"shortcut_{s}{species_blocks[s][0]}/kernel"].shape[1] for s in species_order]
+
+    shortcut_nums = sorted(species_blocks[species_order[0]])  # ascending
+    shortcut_layer_freq = shortcut_nums[1] - shortcut_nums[0] if len(shortcut_nums) > 1 else shortcut_nums[0]
+    output_crop = (input_length - output_length) if (input_length and output_length) else 0
 
     print(
         f"Inferred: num_blocks={num_blocks}, model_dim={model_dim}, "
-        f"output_dims={output_dims}, output_crop={output_crop}"
+        f"output_dims={output_dims}, shortcut_layer_freq={shortcut_layer_freq}, "
+        f"output_crop={output_crop}"
     )
 
     # ── Build PyTorch model ───────────────────────────────────────────────────
@@ -181,108 +188,73 @@ def convert_tf_weights(
         num_blocks=num_blocks,
         model_dim=model_dim,
         output_dims=output_dims,
+        shortcut_layer_freq=shortcut_layer_freq,
         output_crop=output_crop,
     )
     new_sd: dict[str, torch.Tensor] = {}
 
-    def _bn(keras_layer, pt_prefix: str):
-        w = {v.name.split("/")[-1].rstrip(":0"): v.numpy() for v in keras_layer.weights}
-        mapping = {
-            "gamma": "weight",
-            "beta": "bias",
-            "moving_mean": "running_mean",
-            "moving_variance": "running_var",
-        }
-        for k_name, pt_name in mapping.items():
-            if k_name in w:
-                new_sd[f"{pt_prefix}.{pt_name}"] = torch.from_numpy(w[k_name])
-        new_sd[f"{pt_prefix}.num_batches_tracked"] = torch.tensor(0, dtype=torch.long)
-
-    def _conv1d(keras_layer, pt_prefix: str):
-        # TF Conv1D kernel: (kernel_size, in_ch, out_ch) → PT: (out_ch, in_ch, kernel_size)
-        w = {v.name.split("/")[-1].rstrip(":0"): v.numpy() for v in keras_layer.weights}
-        new_sd[f"{pt_prefix}.weight"] = torch.from_numpy(w["kernel"].transpose(2, 1, 0))
-        new_sd[f"{pt_prefix}.bias"] = torch.from_numpy(w["bias"])
-
-    def _dw_conv(keras_layer, pt_prefix: str):
-        # TF DepthwiseConv1D kernel: (kernel_size, in_ch, depth_mult) → PT: (in_ch, depth_mult, kernel_size)
-        # For groups conv: PT weight shape is (out_ch=in_ch, in_ch/groups=1, kernel_size)
-        w = {v.name.split("/")[-1].rstrip(":0"): v.numpy() for v in keras_layer.weights}
-        # depthwise_kernel shape: (kernel_size, in_channels, depth_multiplier)
-        kernel = w["depthwise_kernel"]  # (k, C, 1)
-        new_sd[f"{pt_prefix}.weight"] = torch.from_numpy(
-            kernel.transpose(1, 2, 0)
-        )  # (C, 1, k)
-        if "bias" in w:
-            new_sd[f"{pt_prefix}.bias"] = torch.from_numpy(w["bias"])
-
-    def _dense(keras_layer, pt_prefix: str):
-        # TF Dense kernel: (in, out) → PT Linear: (out, in)
-        w = {v.name.split("/")[-1].rstrip(":0"): v.numpy() for v in keras_layer.weights}
-        new_sd[f"{pt_prefix}.weight"] = torch.from_numpy(w["kernel"].T)
-        new_sd[f"{pt_prefix}.bias"] = torch.from_numpy(w["bias"])
-
-    # ── Stem ─────────────────────────────────────────────────────────────────
-    _conv1d(conv_layers[0], "stem")
+    # ── Stem: Dense (4, model_dim) → Conv1d (model_dim, 4, 1) ────────────────
+    new_sd["stem.weight"] = torch.from_numpy(w["dense/kernel"].T[:, :, None])
+    new_sd["stem.bias"] = torch.from_numpy(w["dense/bias"])
 
     # ── MetaFormer blocks ─────────────────────────────────────────────────────
-    # Layer order per block: bn1, dw_conv, bn2, ffn1, ffn2
-    if len(bn_layers) != num_blocks * 2:
-        raise ValueError(f"Expected {num_blocks * 2} BN layers, found {len(bn_layers)}")
-    if len(ffn_dense) != num_blocks * 2:
-        raise ValueError(
-            f"Expected {num_blocks * 2} FFN Dense layers, found {len(ffn_dense)}"
-        )
-
     for i in range(num_blocks):
+        kp = "meta_former_block" if i == 0 else f"meta_former_block_{i}"
         bp = f"blocks.{i}"
-        _bn(bn_layers[2 * i], f"{bp}.bn1")
-        _dw_conv(dw_layers[i], f"{bp}.dw_conv")
-        _bn(bn_layers[2 * i + 1], f"{bp}.bn2")
-        _dense(ffn_dense[2 * i], f"{bp}.ffn1")
-        _dense(ffn_dense[2 * i + 1], f"{bp}.ffn2")
+
+        def _bn(pt_pfx, keras_bn):
+            new_sd[f"{pt_pfx}.weight"]       = torch.from_numpy(w[f"{kp}/{keras_bn}/gamma"])
+            new_sd[f"{pt_pfx}.bias"]         = torch.from_numpy(w[f"{kp}/{keras_bn}/beta"])
+            new_sd[f"{pt_pfx}.running_mean"] = torch.from_numpy(w[f"{kp}/{keras_bn}/moving_mean"])
+            new_sd[f"{pt_pfx}.running_var"]  = torch.from_numpy(w[f"{kp}/{keras_bn}/moving_variance"])
+            new_sd[f"{pt_pfx}.num_batches_tracked"] = torch.tensor(0, dtype=torch.long)
+
+        _bn(f"{bp}.bn1", "batch_normalization")
+
+        # DepthwiseConv1D kernel: (k, C, 1) → PT grouped conv (C, 1, k)
+        kernel = w[f"{kp}/depthwise_conv1d/depthwise_kernel"]
+        new_sd[f"{bp}.dw_conv.weight"] = torch.from_numpy(kernel.transpose(1, 2, 0))
+        new_sd[f"{bp}.dw_conv.bias"]   = torch.from_numpy(w[f"{kp}/depthwise_conv1d/bias"])
+
+        _bn(f"{bp}.bn2", "batch_normalization_1")
+
+        # FFN Dense (in, out) → Linear weight (out, in)
+        new_sd[f"{bp}.ffn1.weight"] = torch.from_numpy(w[f"{kp}/dense/kernel"].T)
+        new_sd[f"{bp}.ffn1.bias"]   = torch.from_numpy(w[f"{kp}/dense/bias"])
+        new_sd[f"{bp}.ffn2.weight"] = torch.from_numpy(w[f"{kp}/dense_1/kernel"].T)
+        new_sd[f"{bp}.ffn2.bias"]   = torch.from_numpy(w[f"{kp}/dense_1/bias"])
 
     # ── Output heads ──────────────────────────────────────────────────────────
-    shortcut_indices = list(range(num_blocks, 0, -4))
-    for j in sorted(head_groups):
-        # Sort head projection layers by the layer index in their name (descending, matching shortcut_indices)
-        head_layers = sorted(
-            head_groups[j],
-            key=lambda lay: int(re.search(r"_(\d+)$", lay.name).group(1)),
-            reverse=True,
-        )
-        for p_idx, (layer, _) in enumerate(zip(head_layers, shortcut_indices)):
-            _dense(layer, f"output_heads.{j}.projections.{p_idx}")
+    # Projections are ordered highest block → lowest (matching shortcut_indices)
+    shortcut_nums_desc = sorted(shortcut_nums, reverse=True)
+    for j, species in enumerate(species_order):
+        for p_idx, block_num in enumerate(shortcut_nums_desc):
+            kname = f"shortcut_{species}{block_num}"
+            new_sd[f"output_heads.{j}.projections.{p_idx}.weight"] = torch.from_numpy(w[f"{kname}/kernel"].T)
+            new_sd[f"output_heads.{j}.projections.{p_idx}.bias"]   = torch.from_numpy(w[f"{kname}/bias"])
 
     # ── Load and verify ───────────────────────────────────────────────────────
     missing = set(pt_model.state_dict()) - set(new_sd)
-    extra = set(new_sd) - set(pt_model.state_dict())
+    extra   = set(new_sd) - set(pt_model.state_dict())
     if extra:
-        print(
-            f"  Warning: {len(extra)} unexpected keys ignored: {sorted(extra)[:3]}..."
-        )
+        print(f"  Warning: {len(extra)} unexpected keys ignored: {sorted(extra)[:3]}...")
     if missing:
-        print(
-            f"  Warning: {len(missing)} keys not converted (will use random init): {sorted(missing)[:3]}..."
-        )
+        print(f"  Warning: {len(missing)} keys not converted (will use random init): {sorted(missing)[:3]}...")
 
     pt_model.load_state_dict(new_sd, strict=False)
 
-    args_dict = {
+    args_dict: dict = {
         "num_blocks": num_blocks,
         "model_dim": model_dim,
         "output_dims": output_dims,
         "output_crop": output_crop,
+        "shortcut_layer_freq": shortcut_layer_freq,
     }
     if input_length is not None:
         args_dict["input_length"] = input_length
     if output_length is not None:
         args_dict["output_length"] = output_length
 
-    torch.save(
-        {"model_state_dict": pt_model.state_dict(), "args": args_dict}, output_pt_path
-    )
+    torch.save({"model_state_dict": pt_model.state_dict(), "args": args_dict}, output_pt_path)
     n_converted = len(new_sd) - len(missing)
-    print(
-        f"Converted {n_converted}/{len(pt_model.state_dict())} tensors → {output_pt_path}"
-    )
+    print(f"Converted {n_converted}/{len(pt_model.state_dict())} tensors → {output_pt_path}")

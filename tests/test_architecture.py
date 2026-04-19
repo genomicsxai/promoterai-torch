@@ -1,6 +1,6 @@
 import pytest
 import torch
-from torch_promoterai.architecture import MetaFormerBlock, OutputHead, PromoterAI, TwinModel, _dilation_rate
+from promoterai_torch.architecture import MetaFormerBlock, OutputHead, PromoterAI, TwinModel, _dilation_rate
 
 
 def test_dilation_schedule():

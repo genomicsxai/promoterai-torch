@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def _dilation_rate(i):
@@ -23,6 +22,7 @@ class MetaFormerBlock(nn.Module):
         )
         self.bn2 = nn.BatchNorm1d(model_dim, eps=1e-3)
         self.ffn1 = nn.Linear(model_dim, model_dim * 4)
+        self.act = nn.ReLU()
         self.ffn2 = nn.Linear(model_dim * 4, model_dim)
         self._init_weights()
 
@@ -50,7 +50,7 @@ class MetaFormerBlock(nn.Module):
         x_t = intermediate.transpose(1, 2)
         x_t = self.bn2(x_t)
         x_t = x_t.transpose(1, 2)
-        x_t = F.relu(self.ffn1(x_t))
+        x_t = self.act(self.ffn1(x_t))
         x_t = self.ffn2(x_t)
         return intermediate + x_t
 
@@ -72,6 +72,7 @@ class OutputHead(nn.Module):
         self.projections = nn.ModuleList(
             [nn.Linear(model_dim, output_dim) for _ in self.shortcut_indices]
         )
+        self.acts = nn.ModuleList([nn.ReLU() for _ in self.shortcut_indices])
         for proj in self.projections:
             nn.init.trunc_normal_(proj.weight, std=0.01)
             nn.init.zeros_(proj.bias)
@@ -79,8 +80,8 @@ class OutputHead(nn.Module):
     def forward(self, layers: list) -> torch.Tensor:
         """Average shortcut projections from layers list; returns (B, output_length, output_dim)."""
         projected = [
-            F.relu(proj(layers[i]))
-            for proj, i in zip(self.projections, self.shortcut_indices)
+            act(proj(layers[i]))
+            for act, proj, i in zip(self.acts, self.projections, self.shortcut_indices)
         ]
         out = torch.stack(projected, dim=0).mean(dim=0)  # (B, L, output_dim)
         if self.output_crop > 0:
@@ -103,6 +104,7 @@ class PromoterAI(nn.Module):
         super().__init__()
         self.num_blocks = num_blocks
         self.stem = nn.Conv1d(4, model_dim, 1)
+        self.stem_act = nn.ReLU()
         nn.init.xavier_uniform_(self.stem.weight)
         nn.init.zeros_(self.stem.bias)
 
@@ -129,7 +131,7 @@ class PromoterAI(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple:
         """Run full forward pass; x is (B, L, 4), returns tuple of (B, output_length, output_dim) per head."""
         x_t = x.transpose(1, 2)  # (B, 4, L)
-        x_t = F.relu(self.stem(x_t))
+        x_t = self.stem_act(self.stem(x_t))
         layer_0 = x_t.transpose(1, 2)  # (B, L, model_dim)
 
         layers = [None] * (self.num_blocks + 1)
@@ -143,7 +145,7 @@ class PromoterAI(nn.Module):
         """Return final-block sequence embeddings: (B, L, model_dim)."""
         x_t = x.transpose(1, 2)
         out = x_t.transpose(1, 2)
-        out = F.relu(self.stem(x_t)).transpose(1, 2)
+        out = self.stem_act(self.stem(x_t)).transpose(1, 2)
         for block in self.blocks:
             out = block(out)
         return out

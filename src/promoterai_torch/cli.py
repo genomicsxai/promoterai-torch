@@ -96,17 +96,18 @@ def main():
     p_score.add_argument("--var_file", required=True)
     p_score.add_argument("--fasta_file", required=True)
     p_score.add_argument("--input_length", type=int, required=True)
-    p_score.add_argument("--batch_size", type=int, default=8)
+    p_score.add_argument("--batch_size", type=int, default=2)
     p_score.add_argument("--device", default=None)
     p_score.add_argument("--num_workers", type=int, default=4)
-    p_score.add_argument("--verbose", action="store_true", default=False)
+    p_score.add_argument("--output", default=None, metavar="PATH", help="Output path (default: <var_stem>.<model_stem><ext>)")
+    p_score.add_argument("-v", "--verbose", action="store_true", default=False)
 
     args = parser.parse_args()
 
     if args.command == "preprocess":
         import os
 
-        from torch_promoterai.preprocess import preprocess_chrom
+        from promoterai_torch.preprocess import preprocess_chrom
 
         os.makedirs(args.hdf5_folder, exist_ok=True)
         preprocess_chrom(
@@ -121,18 +122,18 @@ def main():
         )
 
     elif args.command == "train":
-        from torch_promoterai.train import main as _main
+        from promoterai_torch.train import main as _main
 
         # Reconstruct sys.argv so train.main() parses cleanly via its own parser
         _run_submodule_main(_main, args)
 
     elif args.command == "finetune":
-        from torch_promoterai.finetune import main as _main
+        from promoterai_torch.finetune import main as _main
 
         _run_submodule_main(_main, args)
 
     elif args.command == "convert":
-        from torch_promoterai.utils import convert_tf_weights
+        from promoterai_torch.utils import convert_tf_weights
 
         convert_tf_weights(
             keras_model_path=args.keras_model,
@@ -142,7 +143,7 @@ def main():
         )
 
     elif args.command == "score":
-        from torch_promoterai.score import main as _main
+        from promoterai_torch.score import main as _main
 
         _run_submodule_main(_main, args)
 

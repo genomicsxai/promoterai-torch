@@ -2,7 +2,7 @@
 Fine-tune PromoterAI on GTEx rare variant outliers using TwinModel.
 
 Usage:
-    python -m torch_promoterai.finetune \
+    python -m promoterai_torch.finetune \
         --model_checkpoint <path/to/best_model.pt> \
         --var_file data/annotation/finetune_gtex.tsv \
         --fasta_file <genome.fa> \
@@ -19,9 +19,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from torch_promoterai.architecture import TwinModel
-from torch_promoterai.dataset import VariantDataset
-from torch_promoterai.utils import (
+from promoterai_torch.architecture import TwinModel
+from promoterai_torch.dataset import VariantDataset
+from promoterai_torch.utils import (
     CSVLogger,
     WeightDecayScheduler,
     load_pretrained,

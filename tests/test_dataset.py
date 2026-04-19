@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from torch_promoterai.dataset import onehot_encode, _prepare_sample
+from promoterai_torch.dataset import onehot_encode, _prepare_sample
 
 
 def test_onehot_encode_bases():

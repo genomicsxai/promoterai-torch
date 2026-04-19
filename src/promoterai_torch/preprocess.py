@@ -2,7 +2,7 @@
 Preprocess TSS annotations + genome FASTA + BigWig tracks into HDF5 files.
 
 Usage:
-    python -m torch_promoterai.preprocess \
+    python -m promoterai_torch.preprocess \
         --hdf5_folder <out> --tss_file data/annotation/tss_hg38.tsv \
         --fasta_file <genome.fa> --bigwig_files data/bigwig/hg38.tsv \
         --chrom chr1 --input_length 32768 --output_length 16384 --chunk_size 256
@@ -17,7 +17,7 @@ import pandas as pd
 import pyBigWig
 import pyfaidx
 
-from torch_promoterai.dataset import onehot_encode
+from promoterai_torch.dataset import onehot_encode
 
 
 def _arcsinh(x):

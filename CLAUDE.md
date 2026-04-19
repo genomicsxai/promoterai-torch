@@ -17,21 +17,21 @@ uv run promoterai-torch --help   # unified CLI: preprocess | train | finetune | 
 Multi-GPU training bypasses the CLI:
 
 ```sh
-torchrun --nproc_per_node=N -m torch_promoterai.train [args]
+torchrun --nproc_per_node=N -m promoterai_torch.train [args]
 ```
 
 ## Package Structure
 
 | File | Purpose |
 | --- | --- |
-| `torch_promoterai/architecture.py` | `MetaFormerBlock`, `PromoterAI`, `TwinModel` |
-| `torch_promoterai/dataset.py` | `onehot_encode`, `_prepare_sample`, `SequenceDataset`, `VariantDataset` |
-| `torch_promoterai/preprocess.py` | TSS + FASTA + BigWig → HDF5 |
-| `torch_promoterai/train.py` | DDP training loop |
-| `torch_promoterai/finetune.py` | GTEx fine-tuning via `TwinModel` |
-| `torch_promoterai/score.py` | Variant effect scoring |
-| `torch_promoterai/cli.py` | Unified `promoterai-torch` entry point |
-| `torch_promoterai/utils.py` | LR/WD scheduler, checkpoint, TF weight converter |
+| `promoterai_torch/architecture.py` | `MetaFormerBlock`, `PromoterAI`, `TwinModel` |
+| `promoterai_torch/dataset.py` | `onehot_encode`, `_prepare_sample`, `SequenceDataset`, `VariantDataset` |
+| `promoterai_torch/preprocess.py` | TSS + FASTA + BigWig → HDF5 |
+| `promoterai_torch/train.py` | DDP training loop |
+| `promoterai_torch/finetune.py` | GTEx fine-tuning via `TwinModel` |
+| `promoterai_torch/score.py` | Variant effect scoring |
+| `promoterai_torch/cli.py` | Unified `promoterai-torch` entry point |
+| `promoterai_torch/utils.py` | LR/WD scheduler, checkpoint, TF weight converter |
 
 ## Dependencies
 

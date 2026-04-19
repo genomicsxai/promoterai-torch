@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "promoterai-torch"
-version = "0.1.0"
+version = "0.1.1"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 train = ["h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3"]
-dev = ["pytest>=8", "h5py>=3.0", "scipy>=1.10"]
+dev = ["pytest>=8", "h5py>=3.0", "scipy>=1.10", "tangermeme>=0.5"]
 
 [project.scripts]
 promoterai-torch = "promoterai_torch.cli:main"

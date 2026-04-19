@@ -99,6 +99,7 @@ def main():
     p_score.add_argument("--batch_size", type=int, default=2)
     p_score.add_argument("--device", default=None)
     p_score.add_argument("--num_workers", type=int, default=4)
+    p_score.add_argument("--output", default=None, metavar="PATH", help="Output path (default: <var_stem>.<model_stem><ext>)")
     p_score.add_argument("-v", "--verbose", action="store_true", default=False)
 
     args = parser.parse_args()

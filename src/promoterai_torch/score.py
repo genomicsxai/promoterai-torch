@@ -37,9 +37,14 @@ def main():
     parser.add_argument("--var_file", required=True)
     parser.add_argument("--fasta_file", required=True)
     parser.add_argument("--input_length", type=int, required=True)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--device", default=None)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Output path (default: <var_file_stem>.<model_stem><ext>)",
+    )
     parser.add_argument("--verbose", action="store_true", default=False)
     args = parser.parse_args()
 
@@ -76,9 +81,12 @@ def main():
     scores = np.tanh(np.concatenate(all_diffs).round(4))
     df_var["score"] = scores
 
-    var_path = Path(args.var_file)
-    model_name = Path(args.model_checkpoint).stem
-    out_path = var_path.parent / f"{var_path.stem}.{model_name}{var_path.suffix}"
+    if args.output:
+        out_path = Path(args.output)
+    else:
+        var_path = Path(args.var_file)
+        model_name = Path(args.model_checkpoint).stem
+        out_path = var_path.parent / f"{var_path.stem}.{model_name}{var_path.suffix}"
     df_var.to_csv(out_path, sep="\t", index=False)
     print(f"Scores written to {out_path}")
 

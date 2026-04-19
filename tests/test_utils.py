@@ -1,5 +1,5 @@
 import pytest
-from torch_promoterai.utils import make_lr_lambda
+from promoterai_torch.utils import make_lr_lambda
 
 
 def test_lr_schedule_warmup():

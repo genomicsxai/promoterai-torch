@@ -54,8 +54,8 @@ Scores are written to `variants.best_model.tsv` as a new `score` column in [−1
 
 ```python
 import torch
-from torch_promoterai.dataset import onehot_encode
-from torch_promoterai.utils import load_pretrained
+from promoterai_torch.dataset import onehot_encode
+from promoterai_torch.utils import load_pretrained
 
 model, args = load_pretrained("models/promoterAI_v1_hg38_mm10_finetune.pt")
 model.eval()
@@ -77,8 +77,8 @@ The output is one tensor per species head (only one head in the published model)
 
 ```python
 import torch
-from torch_promoterai.dataset import onehot_encode
-from torch_promoterai.utils import load_pretrained
+from promoterai_torch.dataset import onehot_encode
+from promoterai_torch.utils import load_pretrained
 
 model, args = load_pretrained("best_model.pt")
 model.eval()
@@ -114,7 +114,7 @@ promoterai-torch train \
 Multi-GPU via `torchrun`:
 
 ```sh
-torchrun --nproc_per_node=4 -m torch_promoterai.train \
+torchrun --nproc_per_node=4 -m promoterai_torch.train \
     --checkpoint_folder checkpoints/run1 \
     --hdf5_human_folder data/hdf5/human \
     --hdf5_nonhuman_folders data/hdf5/mouse \

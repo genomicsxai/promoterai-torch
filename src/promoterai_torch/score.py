@@ -14,7 +14,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyfaidx
 import torch
 from torch.utils.data import DataLoader
 
@@ -54,8 +53,7 @@ def main():
     twin_model.eval()
 
     df_var = pd.read_csv(args.var_file, sep="\t")
-    fasta = pyfaidx.Fasta(args.fasta_file)
-    dataset = VariantDataset(df_var, fasta, args.input_length)
+    dataset = VariantDataset(df_var, args.fasta_file, args.input_length)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,

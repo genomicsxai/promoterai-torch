@@ -137,14 +137,33 @@ class VariantDataset(Dataset):
         input_length: int,
         output_col: str | None = None,
         shuffle: bool = False,
+        boundary: str = "pad",
     ):
-        """Dataset of ref/alt sequence pairs; mismatched ref alleles fall back to zero tensors."""
+        """Dataset of ref/alt sequence pairs; mismatched ref alleles fall back to zero tensors.
+
+        boundary: how to handle variants within input_length//2 bases of a chromosome edge.
+          'pad'   — N-pad the extracted sequence to input_length (N encodes as all-zero row).
+          'zeros' — return all-zero tensors, matching the reference TF implementation.
+        """
+        if boundary not in ("pad", "zeros"):
+            raise ValueError(f"boundary must be 'pad' or 'zeros', got {boundary!r}")
         self.df = df_var.reset_index(drop=True)
         if shuffle:
             self.df = self.df.sample(frac=1).reset_index(drop=True)
-        self.fasta = fasta
+        # Store the path rather than the open Fasta object so that each DataLoader
+        # worker process opens its own file handle after fork, preventing fd races.
+        self._fasta_path = fasta.filename if isinstance(fasta, pyfaidx.Fasta) else str(fasta)
+        self._fasta: pyfaidx.Fasta | None = None
         self.input_length = input_length
         self.output_col = output_col
+        self.boundary = boundary
+
+    @property
+    def fasta(self) -> pyfaidx.Fasta:
+        """Open-on-first-access Fasta handle, once per process."""
+        if self._fasta is None:
+            self._fasta = pyfaidx.Fasta(self._fasta_path)
+        return self._fasta
 
     def __len__(self) -> int:
         """Return number of variants."""
@@ -159,17 +178,28 @@ class VariantDataset(Dataset):
         strand = row.get("strand", 1)
         half = self.input_length // 2
 
-        seq_ref_str = str(self.fasta[chrom][pos - half : pos + half]).upper()
+        start = pos - half
+        seq_ref_str = str(self.fasta[chrom][max(0, start) : pos + half]).upper()
         center = half
 
-        # Validate ref
+        def _zero():
+            x = torch.zeros(self.input_length, 4)
+            y = float(row[self.output_col]) if self.output_col else 0.0
+            return (x, x), y
+
+        if len(seq_ref_str) < self.input_length:
+            if self.boundary == "zeros":
+                print(f"Skipping {chrom}:{pos} {ref_allele}>{alt_allele} (pos issue)")
+                return _zero()
+            # pad: left-pad with N then right-pad; N encodes as all-zero row
+            left_pad = max(0, -start)
+            seq_ref_str = "N" * left_pad + seq_ref_str
+            seq_ref_str = (seq_ref_str + "N" * self.input_length)[: self.input_length]
+
         extracted_ref = seq_ref_str[center : center + len(ref_allele)]
         if extracted_ref != ref_allele:
-            # Fall back to zero tensors rather than crashing during prediction
-            x_ref = torch.zeros(self.input_length, 4)
-            x_alt = torch.zeros(self.input_length, 4)
-            y = float(row[self.output_col]) if self.output_col else 0.0
-            return (x_ref, x_alt), y
+            print(f"Skipping {chrom}:{pos} {ref_allele}>{alt_allele} (ref issue)")
+            return _zero()
 
         # Construct alt sequence
         seq_alt_str = (

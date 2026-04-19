@@ -155,14 +155,17 @@ def convert_tf_weights(
         raise ValueError("No MetaFormerBlock weights found — is this a PromoterAI model?")
     num_blocks = max(block_idx_set) + 1
 
-    # Collect shortcut projections: shortcut_{species}{block_num}/kernel
-    shortcut_pat = re.compile(r"^shortcut_([a-zA-Z]+)(\d+)/kernel$")
+    # Collect shortcut projections.
+    # Multi-species models: shortcut_{species}{N}/kernel  (e.g. shortcut_human24/kernel)
+    # Single-species models: shortcut{N}/kernel           (e.g. shortcut24/kernel)
+    shortcut_pat = re.compile(r"^shortcut(?:_([a-zA-Z]+))?(\d+)/kernel$")
     species_order: list[str] = []
     species_blocks: dict[str, list[int]] = {}
-    for name in keras_model.weights:  # iterate in model weight order to preserve species order
-        m = shortcut_pat.match(name.name.rstrip(":0"))
+    for key in w:  # w is already stripped; preserves insertion order (Python 3.7+)
+        m = shortcut_pat.match(key)
         if m:
-            species, block_num = m.group(1), int(m.group(2))
+            species = m.group(1) or ""  # empty string for single-species models
+            block_num = int(m.group(2))
             if species not in species_order:
                 species_order.append(species)
                 species_blocks[species] = []
@@ -171,7 +174,10 @@ def convert_tf_weights(
     if not species_order:
         raise ValueError("No shortcut_{species}{N} output head weights found.")
 
-    output_dims = [w[f"shortcut_{s}{species_blocks[s][0]}/kernel"].shape[1] for s in species_order]
+    def _shortcut_key(species, block_num):
+        return f"shortcut_{species}{block_num}/kernel" if species else f"shortcut{block_num}/kernel"
+
+    output_dims = [w[_shortcut_key(s, species_blocks[s][0])].shape[1] for s in species_order]
 
     shortcut_nums = sorted(species_blocks[species_order[0]])  # ascending
     shortcut_layer_freq = shortcut_nums[1] - shortcut_nums[0] if len(shortcut_nums) > 1 else shortcut_nums[0]
@@ -229,9 +235,9 @@ def convert_tf_weights(
     shortcut_nums_desc = sorted(shortcut_nums, reverse=True)
     for j, species in enumerate(species_order):
         for p_idx, block_num in enumerate(shortcut_nums_desc):
-            kname = f"shortcut_{species}{block_num}"
-            new_sd[f"output_heads.{j}.projections.{p_idx}.weight"] = torch.from_numpy(w[f"{kname}/kernel"].T)
-            new_sd[f"output_heads.{j}.projections.{p_idx}.bias"]   = torch.from_numpy(w[f"{kname}/bias"])
+            pfx = f"shortcut_{species}{block_num}" if species else f"shortcut{block_num}"
+            new_sd[f"output_heads.{j}.projections.{p_idx}.weight"] = torch.from_numpy(w[f"{pfx}/kernel"].T)
+            new_sd[f"output_heads.{j}.projections.{p_idx}.bias"]   = torch.from_numpy(w[f"{pfx}/bias"])
 
     # ── Load and verify ───────────────────────────────────────────────────────
     missing = set(pt_model.state_dict()) - set(new_sd)

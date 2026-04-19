@@ -96,10 +96,10 @@ def main():
     p_score.add_argument("--var_file", required=True)
     p_score.add_argument("--fasta_file", required=True)
     p_score.add_argument("--input_length", type=int, required=True)
-    p_score.add_argument("--batch_size", type=int, default=8)
+    p_score.add_argument("--batch_size", type=int, default=2)
     p_score.add_argument("--device", default=None)
     p_score.add_argument("--num_workers", type=int, default=4)
-    p_score.add_argument("--verbose", action="store_true", default=False)
+    p_score.add_argument("-v", "--verbose", action="store_true", default=False)
 
     args = parser.parse_args()
 

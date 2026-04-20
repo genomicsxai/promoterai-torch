@@ -1,15 +1,46 @@
-import pytest
+import pytest  # noqa
 import torch
-from promoterai_torch.architecture import MetaFormerBlock, OutputHead, PromoterAI, TwinModel, _dilation_rate
+from promoterai_torch.architecture import (
+    MetaFormerBlock,
+    OutputHead,
+    PromoterAI,
+    TwinModel,
+    _dilation_rate,
+)
 
 
 def test_dilation_schedule():
     # max(1, 2 ** (i // 2 - 1)): dilation doubles every 2 blocks after block 3
-    expected = {0: 1, 1: 1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 4, 7: 4, 8: 8, 9: 8,
-                10: 16, 11: 16, 12: 32, 13: 32, 14: 64, 15: 64,
-                16: 128, 17: 128, 18: 256, 19: 256, 20: 512, 21: 512, 22: 1024, 23: 1024}
+    expected = {
+        0: 1,
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 2,
+        5: 2,
+        6: 4,
+        7: 4,
+        8: 8,
+        9: 8,
+        10: 16,
+        11: 16,
+        12: 32,
+        13: 32,
+        14: 64,
+        15: 64,
+        16: 128,
+        17: 128,
+        18: 256,
+        19: 256,
+        20: 512,
+        21: 512,
+        22: 1024,
+        23: 1024,
+    }
     for i, d in expected.items():
-        assert _dilation_rate(i) == d, f"block {i}: expected dilation {d}, got {_dilation_rate(i)}"
+        assert _dilation_rate(i) == d, (
+            f"block {i}: expected dilation {d}, got {_dilation_rate(i)}"
+        )
 
 
 def test_metaformer_block_shape():
@@ -67,8 +98,9 @@ def test_promoter_ai_forward():
 
 def test_promoter_ai_with_crop():
     B, input_len, output_len = 2, 512, 256
-    model = PromoterAI(num_blocks=4, model_dim=32, output_dims=[10],
-                       output_crop=input_len - output_len)
+    model = PromoterAI(
+        num_blocks=4, model_dim=32, output_dims=[10], output_crop=input_len - output_len
+    )
     x = torch.zeros(B, input_len, 4)
     x[:, :, 1] = 1.0
     outputs = model(x)
@@ -88,7 +120,9 @@ def test_twin_model_trainable_params():
     twin = TwinModel(model)
     trainable = [n for n, p in twin.named_parameters() if p.requires_grad]
     # Only output_heads[0] params should be trainable
-    assert all('output_heads.0' in n for n in trainable), f"Non-output0 params trainable: {trainable}"
+    assert all("output_heads.0" in n for n in trainable), (
+        f"Non-output0 params trainable: {trainable}"
+    )
     assert len(trainable) > 0
 
 
@@ -96,8 +130,10 @@ def test_twin_model_forward():
     B, L = 2, 256
     model = PromoterAI(num_blocks=4, model_dim=32, output_dims=[10], output_crop=0)
     twin = TwinModel(model)
-    x_ref = torch.zeros(B, L, 4); x_ref[:, :, 0] = 1.0
-    x_alt = torch.zeros(B, L, 4); x_alt[:, :, 1] = 1.0
+    x_ref = torch.zeros(B, L, 4)
+    x_ref[:, :, 0] = 1.0
+    x_alt = torch.zeros(B, L, 4)
+    x_alt[:, :, 1] = 1.0
     diff = twin(x_ref, x_alt)
     assert diff.shape == (B,)
 
@@ -108,6 +144,7 @@ def test_twin_model_same_input_zero_diff():
     model.eval()
     twin = TwinModel(model)
     twin.eval()
-    x = torch.zeros(B, L, 4); x[:, :, 0] = 1.0
+    x = torch.zeros(B, L, 4)
+    x[:, :, 0] = 1.0
     diff = twin(x, x)
     assert torch.allclose(diff, torch.zeros(B), atol=1e-6)

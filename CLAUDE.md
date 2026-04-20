@@ -35,9 +35,11 @@ torchrun --nproc_per_node=N -m promoterai_torch.train [args]
 
 ## Dependencies
 
-Core install (`pip install torch-promoterai`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tensorflow-cpu`. TF-cpu is required for `promoterai-torch convert`; downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints).
+Core install (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tqdm`. No TensorFlow dependency for inference.
 
-`[finetune]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `pyBigWig` (preprocessing). Required for `preprocess`, `train`, and `SequenceDataset`.
+`[convert]` extra adds: `tensorflow-cpu` (Linux/Windows) or `tensorflow` (macOS), `tf-keras`. Required for `promoterai-torch convert`; downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints).
+
+`[train]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `pyBigWig` (preprocessing). Required for `preprocess`, `train`, and `SequenceDataset`.
 
 ## Model Architecture
 
@@ -75,6 +77,10 @@ Published hyperparameters: `num_blocks=24`, `model_dim=1024`, `input_length=2048
 - Steps per epoch: `int(sum(dataset_sizes) / 10)`; fine-tuning: 20% of data per epoch
 - Checkpoint saves **base model** `state_dict` (unwrapped from DDP) on val loss improvement — fine-tuning also saves base model, not the twin wrapper
 - `SyncBatchNorm.convert_sync_batchnorm` must run **before** `DistributedDataParallel`
+
+## Numerical Equivalence
+
+The PyTorch port was validated against the original TF/Keras implementation on TERT promoter variants (6,006 variants, both `hg38_finetune` and `hg38_mm10_finetune` models). Scores are numerically identical: r=1.0000, MAE=0.0000 for both individual models and their average, and for comparison against the published PromoterAI scores. Analysis notebooks are in `examples/plot_TERT.ipynb`.
 
 ## Key Data Details
 

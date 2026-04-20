@@ -6,15 +6,23 @@ Models are built using tf_keras subclassed layers to match the weight naming
 convention of the Illumina SavedModel (Dense stem, MetaFormerBlock sublayers,
 shortcut_{species}{N} output projections).
 """
+
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
 pytest.importorskip("tf_keras", reason="tf-keras not installed")
 
 
-def _build_tf_keras_model(num_blocks=8, model_dim=16, output_dims=(8,), output_crop=0,
-                          kernel_size=5, shortcut_layer_freq=4, species=("human",)):
+def _build_tf_keras_model(
+    num_blocks=8,
+    model_dim=16,
+    output_dims=(8,),
+    output_crop=0,
+    kernel_size=5,
+    shortcut_layer_freq=4,
+    species=("human",),
+):
     """Build a minimal PromoterAI-like model matching the Illumina subclassed weight format."""
     import tf_keras as keras
 
@@ -24,12 +32,22 @@ def _build_tf_keras_model(num_blocks=8, model_dim=16, output_dims=(8,), output_c
             # Explicit names ensure weight paths match the real model regardless of
             # the global Keras name counter (which carries over between test runs).
             self.depthwise_conv1d = keras.layers.DepthwiseConv1D(
-                kernel_size, dilation_rate=dilation_rate, padding='same', use_bias=True,
-                name='depthwise_conv1d')
-            self.batch_normalization = keras.layers.BatchNormalization(name='batch_normalization')
-            self.batch_normalization_1 = keras.layers.BatchNormalization(name='batch_normalization_1')
-            self.dense = keras.layers.Dense(model_dim * 4, activation='relu', name='dense')
-            self.dense_1 = keras.layers.Dense(model_dim, name='dense_1')
+                kernel_size,
+                dilation_rate=dilation_rate,
+                padding="same",
+                use_bias=True,
+                name="depthwise_conv1d",
+            )
+            self.batch_normalization = keras.layers.BatchNormalization(
+                name="batch_normalization"
+            )
+            self.batch_normalization_1 = keras.layers.BatchNormalization(
+                name="batch_normalization_1"
+            )
+            self.dense = keras.layers.Dense(
+                model_dim * 4, activation="relu", name="dense"
+            )
+            self.dense_1 = keras.layers.Dense(model_dim, name="dense_1")
 
         def call(self, x, training=None):
             x_norm = self.batch_normalization(x, training=training)
@@ -39,22 +57,26 @@ def _build_tf_keras_model(num_blocks=8, model_dim=16, output_dims=(8,), output_c
 
     inp = keras.Input(shape=(None, 4))
     # Stem: explicitly named 'dense' to match the real model's weight path
-    x = keras.layers.Dense(model_dim, activation='relu', name='dense')(inp)
+    x = keras.layers.Dense(model_dim, activation="relu", name="dense")(inp)
 
     # Blocks: named meta_former_block, meta_former_block_1, ...
     block_outputs = [None] * (num_blocks + 1)
     block_outputs[0] = x
     for i in range(num_blocks):
         dilation = max(1, 2 ** (i // 2 - 1))
-        name = 'meta_former_block' if i == 0 else f'meta_former_block_{i}'
-        block_outputs[i + 1] = MetaFormerBlock(model_dim, kernel_size, dilation, name=name)(block_outputs[i])
+        name = "meta_former_block" if i == 0 else f"meta_former_block_{i}"
+        block_outputs[i + 1] = MetaFormerBlock(
+            model_dim, kernel_size, dilation, name=name
+        )(block_outputs[i])
 
     # Output heads: shortcut_{species}{block_num} naming
     shortcut_nums = list(range(num_blocks, 0, -shortcut_layer_freq))
     outputs = []
     for sp, od in zip(species, output_dims):
         projs = [
-            keras.layers.Dense(od, activation='relu', name=f'shortcut_{sp}{n}')(block_outputs[n])
+            keras.layers.Dense(od, activation="relu", name=f"shortcut_{sp}{n}")(
+                block_outputs[n]
+            )
             for n in shortcut_nums
         ]
         head = keras.layers.Average()(projs) if len(projs) > 1 else projs[0]
@@ -68,7 +90,8 @@ def _build_tf_keras_model(num_blocks=8, model_dim=16, output_dims=(8,), output_c
 def _save_savedmodel(model, path: str):
     """Save a tf_keras model in SavedModel format (directory, no extension)."""
     import tf_keras as keras
-    keras.models.save_model(model, path, save_format='tf')
+
+    keras.models.save_model(model, path, save_format="tf")
 
 
 def test_convert_infers_architecture(tmp_path):
@@ -95,7 +118,9 @@ def test_convert_loads_cleanly(tmp_path):
     _save_savedmodel(model, str(tmp_path / "keras_model"))
 
     out_pt = str(tmp_path / "model.pt")
-    convert_tf_weights(str(tmp_path / "keras_model"), out_pt, input_length=512, output_length=512)
+    convert_tf_weights(
+        str(tmp_path / "keras_model"), out_pt, input_length=512, output_length=512
+    )
 
     pt_model, args = load_pretrained(out_pt)
     assert args["input_length"] == 512
@@ -112,7 +137,8 @@ def test_convert_multi_species(tmp_path):
     from promoterai_torch.utils import convert_tf_weights, load_pretrained
 
     model = _build_tf_keras_model(
-        num_blocks=8, model_dim=16, output_dims=(8, 6), species=("human", "mouse"))
+        num_blocks=8, model_dim=16, output_dims=(8, 6), species=("human", "mouse")
+    )
     _save_savedmodel(model, str(tmp_path / "keras_model"))
 
     out_pt = str(tmp_path / "model.pt")
@@ -154,6 +180,8 @@ def test_convert_numerical_parity(tmp_path):
         pt_out = pt_model(x_pt)[0].numpy()  # (1, L, 8)
 
     np.testing.assert_allclose(
-        pt_out, keras_out, atol=1e-4,
+        pt_out,
+        keras_out,
+        atol=1e-4,
         err_msg="Keras and PyTorch outputs differ after conversion",
     )

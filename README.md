@@ -1,28 +1,39 @@
 # promoterai-torch
 
-A PyTorch port of [PromoterAI](https://github.com/Illumina/PromoterAI) v1 from Illumina — a deep learning model published in *Science* (2025) that predicts the regulatory impact of promoter DNA variants on gene expression. Note that this is **not** an official Illumina product or publication; I have no affiliation with Illumina and the original authors were not informed of this port prior to its release.
+A PyTorch port of [PromoterAI](https://github.com/Illumina/PromoterAI) v1 from Illumina — a deep learning model that predicts the regulatory impact of promoter DNA variants on gene expression.
+
+> [!Important]
+> This is **not** an official Illumina product or publication; I have no affiliation with Illumina and the original authors were not informed of this port prior to its release.
 
 ## Install
 
-For running inference, converting pretrained TensorFlow models, or loading PyTorch models:
+If you already have a PromoterAI-torch model and only wish to run inference/interpretation on it, you should install just the core dependencies:
 
 ```sh
-pip install torch-promoterai
+pip install promoterai-torch
 # or with uv:
-uv add torch-promoterai
+uv add promoterai-torch
 ```
 
-For fine-tuning or training from scratch, install the additional dependencies:
+Converting a pretrained Keras/TensorFlow SavedModel (including the official releases from Illumina) requires additional TensorFlow dependencies:
 
 ```sh
-pip install "torch-promoterai[train]"
+pip install "promoterai-torch[convert]"
 # or with uv:
-uv add "torch-promoterai[finetune]"
+uv add "promoterai-torch[convert]"
+```
+
+Fine-tuning or training from scratch requires a couple extra dependencies for data preprocessing
+
+```sh
+pip install "promoterai-torch[train]"
+# or with uv:
+uv add "promoterai-torch[train]"
 ```
 
 ## Convert a pretrained Keras model
 
-Download the pretrained PromoterAI SavedModel from [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI), then convert it to a PyTorch checkpoint:
+First install the `[convert]` extra (see above), then download the pretrained PromoterAI SavedModel from [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI) and convert it to a PyTorch checkpoint:
 
 ```sh
 promoterai-torch convert \
@@ -48,9 +59,19 @@ promoterai-torch score \
     --input_length 20480
 ```
 
-Scores are written to `variants.best_model.tsv` as a new `score` column in [−1, 1]. Thresholds: ±0.1 (weak effect), ±0.2 (moderate), ±0.5 (strong).
+Scores are written by default to `variants.{model_name}.tsv` as a new `score` column in [−1, 1] (or to a file path provided by `--output`). Thresholds: ±0.1 (weak effect), ±0.2 (moderate), ±0.5 (strong).
+
+#### Numerical equivalence
+
+Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the original TF/Keras implementation on *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3003), and *DNAJC9* (*n* = 9009) promoter variants. Scores are numerically identical across all comparisons — including the ensembled scores against the published PromoterAI output (Pearson r = 1.0000, MAE = 0.0000). See `examples/` for details.
+
+![TERT scatter](examples/img/TERT_scatter.svg)
+![SFSWAP scatter](examples/img/SFSWAP_scatter.svg)
+![DNAJC9 scatter](examples/img/DNAJC9_scatter.svg)
 
 ### Run inference on a genomic sequence
+
+One can also generate predictions for all the tracks that PromoterAI was trained on (these are aggregated and diff'ed to generate the variant scores).
 
 ```python
 import torch
@@ -71,7 +92,7 @@ with torch.no_grad():
 track_predictions = predictions[0]   # (1, output_length, n_tracks) — arcsinh-scale signal
 ```
 
-The output is one tensor per species head (only one head in the published model). Each tensor has shape `(batch, output_length, n_tracks)` where `n_tracks=498` for the published hg38 model (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq).
+The output is one tensor per species head. Each tensor has shape `(batch, output_length, n_tracks)` where `n_tracks=498` for the published human head (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq) and `n_tracks=??` for the mouse head.
 
 ### Extract embeddings
 
@@ -80,7 +101,7 @@ import torch
 from promoterai_torch.dataset import onehot_encode
 from promoterai_torch.utils import load_pretrained
 
-model, args = load_pretrained("best_model.pt")
+model, args = load_pretrained("model.pt")
 model.eval()
 
 seq = "ACGT" * (args["input_length"] // 4)   # replace with your sequence
@@ -92,9 +113,42 @@ with torch.no_grad():
 
 `model.encode()` returns the final MetaFormer block output — a per-position representation of shape `(B, L, model_dim)` suitable for downstream tasks.
 
+### DeepLIFT/SHAP attribution
+
+The architecture uses named `nn.ReLU()` module instances (one per non-linearity) so it is compatible with [`tangermeme`](https://github.com/jmschrei/tangermeme)'s `deep_lift_shap`. Wrap the model to transpose the channels-first input expected by tangermeme and reduce the output to `(batch, n_targets)`:
+
+```python
+import torch
+import torch.nn as nn
+from tangermeme.deep_lift_shap import deep_lift_shap
+from promoterai_torch.utils import load_pretrained
+
+model, args = load_pretrained("model.pt")
+model.eval()
+
+class PromoterAIWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):          # x: (B, 4, L) channels-first
+        out = self.model(x.transpose(1, 2))   # PromoterAI expects (B, L, 4)
+        return out[0].mean(dim=1)  # (B, n_tracks) — mean over positions
+
+wrapper = PromoterAIWrapper(model)
+
+# x: (B, 4, input_length) one-hot, channels-first
+x = torch.zeros(1, 4, args["input_length"])
+x[0, 0, :] = 1.0  # replace with your sequences
+
+attributions = deep_lift_shap(wrapper, x, n_shuffles=20, device="cpu")
+# attributions: (B, 4, input_length) — per-position, per-base importance
+```
+
 ## Training from scratch
 
-**WARNING** This functionality is completely untested. It was just auto-ported by Claude because this function was present in the original PromoterAI repo. I'm keeping it here in case someone might find it useful, but I haven't done any work to verify that this is correct or even runs.
+> [!Warning]
+> This functionality is completely untested. It was just auto-ported by Claude because this function was present in the original PromoterAI repo. I'm keeping it here in case someone might find it useful, but I haven't done any work to verify that this is correct or even runs. I may eventually need to use it, at which point this will receive more careful testing and development.
 
 Preprocess one chromosome at a time (parallelizable), then train:
 
@@ -147,5 +201,5 @@ uv run pytest tests/ -v
 
 ## Reference
 
-Jaganathan, Ersaro, Novakovsky et al. *Science* (2025).
+Jaganathan, Ersaro, Novakovsky et al. *Science* (2025) Predicting expression-altering promoter mutations with deep learning. doi:10.1126/science.ads7373
 Original TF implementation: [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI)

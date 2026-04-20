@@ -152,7 +152,9 @@ def convert_tf_weights(
         if m:
             block_idx_set.add(int(m.group(1)) if m.group(1) else 0)
     if not block_idx_set:
-        raise ValueError("No MetaFormerBlock weights found — is this a PromoterAI model?")
+        raise ValueError(
+            "No MetaFormerBlock weights found — is this a PromoterAI model?"
+        )
     num_blocks = max(block_idx_set) + 1
 
     # Collect shortcut projections.
@@ -175,13 +177,25 @@ def convert_tf_weights(
         raise ValueError("No shortcut_{species}{N} output head weights found.")
 
     def _shortcut_key(species, block_num):
-        return f"shortcut_{species}{block_num}/kernel" if species else f"shortcut{block_num}/kernel"
+        return (
+            f"shortcut_{species}{block_num}/kernel"
+            if species
+            else f"shortcut{block_num}/kernel"
+        )
 
-    output_dims = [w[_shortcut_key(s, species_blocks[s][0])].shape[1] for s in species_order]
+    output_dims = [
+        w[_shortcut_key(s, species_blocks[s][0])].shape[1] for s in species_order
+    ]
 
     shortcut_nums = sorted(species_blocks[species_order[0]])  # ascending
-    shortcut_layer_freq = shortcut_nums[1] - shortcut_nums[0] if len(shortcut_nums) > 1 else shortcut_nums[0]
-    output_crop = (input_length - output_length) if (input_length and output_length) else 0
+    shortcut_layer_freq = (
+        shortcut_nums[1] - shortcut_nums[0]
+        if len(shortcut_nums) > 1
+        else shortcut_nums[0]
+    )
+    output_crop = (
+        (input_length - output_length) if (input_length and output_length) else 0
+    )
 
     print(
         f"Inferred: num_blocks={num_blocks}, model_dim={model_dim}, "
@@ -209,10 +223,14 @@ def convert_tf_weights(
         bp = f"blocks.{i}"
 
         def _bn(pt_pfx, keras_bn):
-            new_sd[f"{pt_pfx}.weight"]       = torch.from_numpy(w[f"{kp}/{keras_bn}/gamma"])
-            new_sd[f"{pt_pfx}.bias"]         = torch.from_numpy(w[f"{kp}/{keras_bn}/beta"])
-            new_sd[f"{pt_pfx}.running_mean"] = torch.from_numpy(w[f"{kp}/{keras_bn}/moving_mean"])
-            new_sd[f"{pt_pfx}.running_var"]  = torch.from_numpy(w[f"{kp}/{keras_bn}/moving_variance"])
+            new_sd[f"{pt_pfx}.weight"] = torch.from_numpy(w[f"{kp}/{keras_bn}/gamma"])
+            new_sd[f"{pt_pfx}.bias"] = torch.from_numpy(w[f"{kp}/{keras_bn}/beta"])
+            new_sd[f"{pt_pfx}.running_mean"] = torch.from_numpy(
+                w[f"{kp}/{keras_bn}/moving_mean"]
+            )
+            new_sd[f"{pt_pfx}.running_var"] = torch.from_numpy(
+                w[f"{kp}/{keras_bn}/moving_variance"]
+            )
             new_sd[f"{pt_pfx}.num_batches_tracked"] = torch.tensor(0, dtype=torch.long)
 
         _bn(f"{bp}.bn1", "batch_normalization")
@@ -220,32 +238,44 @@ def convert_tf_weights(
         # DepthwiseConv1D kernel: (k, C, 1) → PT grouped conv (C, 1, k)
         kernel = w[f"{kp}/depthwise_conv1d/depthwise_kernel"]
         new_sd[f"{bp}.dw_conv.weight"] = torch.from_numpy(kernel.transpose(1, 2, 0))
-        new_sd[f"{bp}.dw_conv.bias"]   = torch.from_numpy(w[f"{kp}/depthwise_conv1d/bias"])
+        new_sd[f"{bp}.dw_conv.bias"] = torch.from_numpy(
+            w[f"{kp}/depthwise_conv1d/bias"]
+        )
 
         _bn(f"{bp}.bn2", "batch_normalization_1")
 
         # FFN Dense (in, out) → Linear weight (out, in)
         new_sd[f"{bp}.ffn1.weight"] = torch.from_numpy(w[f"{kp}/dense/kernel"].T)
-        new_sd[f"{bp}.ffn1.bias"]   = torch.from_numpy(w[f"{kp}/dense/bias"])
+        new_sd[f"{bp}.ffn1.bias"] = torch.from_numpy(w[f"{kp}/dense/bias"])
         new_sd[f"{bp}.ffn2.weight"] = torch.from_numpy(w[f"{kp}/dense_1/kernel"].T)
-        new_sd[f"{bp}.ffn2.bias"]   = torch.from_numpy(w[f"{kp}/dense_1/bias"])
+        new_sd[f"{bp}.ffn2.bias"] = torch.from_numpy(w[f"{kp}/dense_1/bias"])
 
     # ── Output heads ──────────────────────────────────────────────────────────
     # Projections are ordered highest block → lowest (matching shortcut_indices)
     shortcut_nums_desc = sorted(shortcut_nums, reverse=True)
     for j, species in enumerate(species_order):
         for p_idx, block_num in enumerate(shortcut_nums_desc):
-            pfx = f"shortcut_{species}{block_num}" if species else f"shortcut{block_num}"
-            new_sd[f"output_heads.{j}.projections.{p_idx}.weight"] = torch.from_numpy(w[f"{pfx}/kernel"].T)
-            new_sd[f"output_heads.{j}.projections.{p_idx}.bias"]   = torch.from_numpy(w[f"{pfx}/bias"])
+            pfx = (
+                f"shortcut_{species}{block_num}" if species else f"shortcut{block_num}"
+            )
+            new_sd[f"output_heads.{j}.projections.{p_idx}.weight"] = torch.from_numpy(
+                w[f"{pfx}/kernel"].T
+            )
+            new_sd[f"output_heads.{j}.projections.{p_idx}.bias"] = torch.from_numpy(
+                w[f"{pfx}/bias"]
+            )
 
     # ── Load and verify ───────────────────────────────────────────────────────
     missing = set(pt_model.state_dict()) - set(new_sd)
-    extra   = set(new_sd) - set(pt_model.state_dict())
+    extra = set(new_sd) - set(pt_model.state_dict())
     if extra:
-        print(f"  Warning: {len(extra)} unexpected keys ignored: {sorted(extra)[:3]}...")
+        print(
+            f"  Warning: {len(extra)} unexpected keys ignored: {sorted(extra)[:3]}..."
+        )
     if missing:
-        print(f"  Warning: {len(missing)} keys not converted (will use random init): {sorted(missing)[:3]}...")
+        print(
+            f"  Warning: {len(missing)} keys not converted (will use random init): {sorted(missing)[:3]}..."
+        )
 
     pt_model.load_state_dict(new_sd, strict=False)
 
@@ -261,6 +291,10 @@ def convert_tf_weights(
     if output_length is not None:
         args_dict["output_length"] = output_length
 
-    torch.save({"model_state_dict": pt_model.state_dict(), "args": args_dict}, output_pt_path)
+    torch.save(
+        {"model_state_dict": pt_model.state_dict(), "args": args_dict}, output_pt_path
+    )
     n_converted = len(new_sd) - len(missing)
-    print(f"Converted {n_converted}/{len(pt_model.state_dict())} tensors → {output_pt_path}")
+    print(
+        f"Converted {n_converted}/{len(pt_model.state_dict())} tensors → {output_pt_path}"
+    )

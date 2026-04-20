@@ -92,6 +92,7 @@ class SequenceDataset(Dataset):
     ):
         """Load sequences from HDF5 files; sample_weight is a per-species boolean tuple."""
         import h5py  # noqa: PLC0415 — optional train dependency
+
         self.hdf5_files = hdf5_files
         self.input_length = input_length
         self.output_length = output_length
@@ -111,6 +112,7 @@ class SequenceDataset(Dataset):
     def __getitem__(self, idx: int):
         """Return (x_tensor, y_tuple, weight_tensor) after cropping and optional augmentation."""
         import h5py
+
         fi, ri = self._index[idx]
         with h5py.File(self.hdf5_files[fi], "r") as f:
             x = f["x"][ri]  # (L_stored, 4)
@@ -152,7 +154,9 @@ class VariantDataset(Dataset):
             self.df = self.df.sample(frac=1).reset_index(drop=True)
         # Store the path rather than the open Fasta object so that each DataLoader
         # worker process opens its own file handle after fork, preventing fd races.
-        self._fasta_path = fasta.filename if isinstance(fasta, pyfaidx.Fasta) else str(fasta)
+        self._fasta_path = (
+            fasta.filename if isinstance(fasta, pyfaidx.Fasta) else str(fasta)
+        )
         self._fasta: pyfaidx.Fasta | None = None
         self.input_length = input_length
         self.output_col = output_col

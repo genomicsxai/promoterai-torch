@@ -1,3 +1,4 @@
+examples/data/*.promoterAI*
 PromoterAI/
 **/.vscode
 **/.DS_Store

@@ -3,7 +3,7 @@
 A PyTorch port of [PromoterAI](https://github.com/Illumina/PromoterAI) v1 from Illumina — a deep learning model that predicts the regulatory impact of promoter DNA variants on gene expression.
 
 > [!Important]
-> This is **not** an official Illumina product or publication; I have no affiliation with Illumina and the original authors were not informed of this port prior to its release.
+> This is **not** an official Illumina product or publication. The contents of this package are solely the responsibility of the authors/maintainers and its release should not be construed as being supported/endorsed by Illumina or the original authors of PromoterAI.
 
 ## Install
 
@@ -23,7 +23,7 @@ pip install "promoterai-torch[convert]"
 uv add "promoterai-torch[convert]"
 ```
 
-Fine-tuning or training from scratch requires a couple extra dependencies for data preprocessing
+Fine-tuning or training from scratch using the built-in scripts requires a couple extra dependencies for data preprocessing:
 
 ```sh
 pip install "promoterai-torch[train]"
@@ -148,7 +148,7 @@ attributions = deep_lift_shap(wrapper, x, n_shuffles=20, device="cpu")
 ## Training from scratch
 
 > [!Warning]
-> This functionality is completely untested. It was just auto-ported by Claude because this function was present in the original PromoterAI repo. I'm keeping it here in case someone might find it useful, but I haven't done any work to verify that this is correct or even runs. I may eventually need to use it, at which point this will receive more careful testing and development.
+> This functionality is completely untested; I have not verified whether any of this runs or is correct. It was just auto-ported by Claude because this function was present in the original PromoterAI repo. I may eventually need to use it, at which point this will receive more careful testing and development.
 
 Preprocess one chromosome at a time (parallelizable), then train:
 

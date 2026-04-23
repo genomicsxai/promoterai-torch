@@ -65,9 +65,9 @@ Scores are written by default to `variants.{model_name}.tsv` as a new `score` co
 
 Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the original TF/Keras implementation on *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3003), and *DNAJC9* (*n* = 9009) promoter variants. Scores are numerically identical across all comparisons — including the ensembled scores against the published PromoterAI output (Pearson r = 1.0000, MAE = 0.0000). See `examples/` for details.
 
-![TERT scatter](examples/img/TERT_scatter.svg)
-![SFSWAP scatter](examples/img/SFSWAP_scatter.svg)
-![DNAJC9 scatter](examples/img/DNAJC9_scatter.svg)
+![TERT scatter](examples/img/TERT_scatter.png)
+![SFSWAP scatter](examples/img/SFSWAP_scatter.png)
+![DNAJC9 scatter](examples/img/DNAJC9_scatter.png)
 
 ### Run inference on a genomic sequence
 
@@ -115,7 +115,7 @@ with torch.no_grad():
 
 ### DeepLIFT/SHAP attribution
 
-The architecture uses named `nn.ReLU()` module instances (one per non-linearity) so it is compatible with [`tangermeme`](https://github.com/jmschrei/tangermeme)'s `deep_lift_shap`. Wrap the model to transpose the channels-first input expected by tangermeme and reduce the output to `(batch, n_targets)`:
+The architecture uses named `nn.ReLU()` module instances (one per non-linearity) so it is compatible with [`tangermeme`](https://github.com/jmschrei/tangermeme)'s `deep_lift_shap`. Wrap the model to transpose the channels-first input expected by tangermeme and reduce the output to `(batch, 1)` (we average over positions and tracks in the demo script):
 
 ```python
 import torch
@@ -131,9 +131,10 @@ class PromoterAIWrapper(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, x):          # x: (B, 4, L) channels-first
-        out = self.model(x.transpose(1, 2))   # PromoterAI expects (B, L, 4)
-        return out[0].mean(dim=1)  # (B, n_tracks) — mean over positions
+    def forward(self, x):                           # x: (B, 4, L) channels-first
+        out = self.model(x.transpose(1, 2))         # PromoterAI expects (B, L, 4)
+        out = out[0].mean(dim=(1, 2)).unsqueeze(1)  # (B, 1) — mean over positions and tracks
+        return out
 
 wrapper = PromoterAIWrapper(model)
 
@@ -141,9 +142,13 @@ wrapper = PromoterAIWrapper(model)
 x = torch.zeros(1, 4, args["input_length"])
 x[0, 0, :] = 1.0  # replace with your sequences
 
-attributions = deep_lift_shap(wrapper, x, n_shuffles=20, device="cpu")
+attributions = deep_lift_shap(wrapper, x, n_shuffles=20, device="cuda", batch_size=1)
 # attributions: (B, 4, input_length) — per-position, per-base importance
 ```
+
+![SFSWAP DeepLIFTSHAP](examples/img/deepliftshap.png)
+
+Do note that calculating DeepLIFT/SHAP on this model is quite expensive: with TF32, `n_shuffles=20`, and `batch_size=1`, it takes ~92s/sequence with ~71GB VRAM used on an A100 80GB.
 
 ## Training from scratch
 

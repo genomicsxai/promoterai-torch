@@ -1,9 +1,13 @@
 # promoterai-torch
 
+[![PyPI](https://img.shields.io/pypi/v/promoterai-torch)](https://pypi.org/project/promoterai-torch/) [![Tests](https://github.com/adamyhe/promoterai-torch/actions/workflows/tests.yml/badge.svg)](https://github.com/adamyhe/promoterai-torch/actions/workflows/tests.yml) [![PyPI Downloads](https://static.pepy.tech/personalized-badge/promoterai-torch?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/promoterai-torch)
+
 A PyTorch port of [PromoterAI](https://github.com/Illumina/PromoterAI) v1 from Illumina — a deep learning model that predicts the regulatory impact of promoter DNA variants on gene expression.
 
 > [!Important]
 > This is **not** an official Illumina product or publication. The contents of this package are solely the responsibility of the authors/maintainers and its release should not be construed as being supported/endorsed by Illumina or the original authors of PromoterAI.
+>
+> The official PromoterAI codebase, models, and variant scores are released under fairly restrictive licensing (see [their github](https://github.com/Illumina/PromoterAI) for instructions on academic/commercial licensing). Please do not redistribute converted checkpoints.
 
 ## Install
 
@@ -60,14 +64,6 @@ promoterai-torch score \
 ```
 
 Scores are written by default to `variants.{model_name}.tsv` as a new `score` column in [−1, 1] (or to a file path provided by `--output`). Thresholds: ±0.1 (weak effect), ±0.2 (moderate), ±0.5 (strong).
-
-#### Numerical equivalence
-
-Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the original TF/Keras implementation on *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3003), and *DNAJC9* (*n* = 9009) promoter variants. Scores are numerically identical across all comparisons — including the ensembled scores against the published PromoterAI output (Pearson r = 1.0000, MAE = 0.0000). See `examples/` for details.
-
-![TERT scatter](examples/img/TERT_scatter.png)
-![SFSWAP scatter](examples/img/SFSWAP_scatter.png)
-![DNAJC9 scatter](examples/img/DNAJC9_scatter.png)
 
 ### Run inference on a genomic sequence
 
@@ -150,10 +146,43 @@ attributions = deep_lift_shap(wrapper, x, n_shuffles=20, device="cuda", batch_si
 
 Do note that calculating DeepLIFT/SHAP on this model is quite expensive: with TF32, `n_shuffles=20`, and `batch_size=1`, it takes ~92s/sequence with ~71GB VRAM used on an A100 80GB.
 
+## Numerical equivalence
+
+Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the original TF/Keras implementation on *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3003), and *DNAJC9* (*n* = 9009) promoter variants. Scores are identical across all comparisons, including the ensembled scores against the published PromoterAI variant scores (Pearson r = 1.0000, MAE = 0.0000). See `examples/` for details. Note that this repo follows the official PromoterAI and rounds variant scores to 4 decimal places.
+
+![TERT scatter](examples/img/TERT_scatter.png)
+![SFSWAP scatter](examples/img/SFSWAP_scatter.png)
+![DNAJC9 scatter](examples/img/DNAJC9_scatter.png)
+
+The example scripts can also compare the full predicted regulatory tracks from the original TF/Keras SavedModel and the converted PyTorch checkpoint. This reports mean and max absolute error per input sequence and output head.
+
+```sh
+python examples/compare_tf_torch_tracks_promoters.py \
+    --keras_model models/promoterAI_v1_hg38_mm10_finetune \
+    --torch_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
+    --fasta hg38.fa \
+    --promoter DNAJC9:chr10:73247254:- \
+    --promoter TERT:chr5:1294988:- \
+    --promoter SFSWAP:chr12:131710589:+
+
+python examples/compare_tf_torch_tracks_random.py \
+    --keras_model models/promoterAI_v1_hg38_mm10_finetune \
+    --torch_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
+    --n_sequences 8 \
+    --seed 0
+```
+
+Both track parity scripts default to a VRAM-safe separate-loop mode: TensorFlow
+runs first in a child process, writes temporary memmaps, exits to release CUDA
+memory, and then PyTorch runs. Pass `--interleaved` only for small debugging
+runs where both runtimes fit in GPU memory.
+
+Errors are ~1e-7 (<1e-4) when run at FP32, i.e., within machine precision, when comparing all four official TF/Keras SavedModels (`hg38`, `hg38_mm10`, `hg38_finetune`, and `hg38_mm10_finetune`) against their PyTorch checkpoints.
+
 ## Training from scratch
 
 > [!Warning]
-> This functionality is completely untested; I have not verified whether any of this runs or is correct. It was just auto-ported by Claude because this function was present in the original PromoterAI repo. I may eventually need to use it, at which point this will receive more careful testing and development.
+> This functionality is completely untested; I have not verified whether any of this runs or is correct. I may eventually need to use it, at which point this will receive more careful testing and development.
 
 Preprocess one chromosome at a time (parallelizable), then train:
 
@@ -181,7 +210,7 @@ torchrun --nproc_per_node=4 -m promoterai_torch.train \
     --num_blocks 24 --model_dim 1024 --batch_size 32
 ```
 
-### Fine-tune on custom variants
+### Fine-tune on variants
 
 ```sh
 promoterai-torch finetune \
@@ -199,6 +228,8 @@ The variant TSV must include `chrom`, `pos`, `ref`, `alt`, `strand`, `z` (expres
 
 ## Development
 
+Clone and install locally with `pip`/`uv`.
+
 ```sh
 uv sync --extra dev
 uv run pytest tests/ -v
@@ -207,4 +238,5 @@ uv run pytest tests/ -v
 ## Reference
 
 Jaganathan, Ersaro, Novakovsky et al. *Science* (2025) Predicting expression-altering promoter mutations with deep learning. doi:10.1126/science.ads7373
+
 Original TF implementation: [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI)

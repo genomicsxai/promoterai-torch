@@ -1,6 +1,7 @@
 import pytest
+import torch
 
-from promoterai_torch.utils import make_lr_lambda
+from promoterai_torch.utils import apply_optimizer_schedule, make_lr_lambda
 
 
 def test_lr_schedule_warmup():
@@ -39,3 +40,20 @@ def test_lr_lambda_non_negative():
     fn = make_lr_lambda(200)
     for epoch in range(200):
         assert fn(epoch) >= 0
+
+
+def test_apply_optimizer_schedule_updates_lr_and_weight_decay_at_epoch_begin():
+    param = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([param], lr=5e-4, weight_decay=5e-6)
+
+    scale = apply_optimizer_schedule(
+        optimizer,
+        base_lr=5e-4,
+        base_wd=5e-6,
+        total_epochs=100,
+        epoch=0,
+    )
+
+    assert scale == pytest.approx(0.1)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
+    assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(5e-7)

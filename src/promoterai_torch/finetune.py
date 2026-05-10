@@ -23,9 +23,8 @@ from promoterai_torch.architecture import TwinModel
 from promoterai_torch.dataset import VariantDataset
 from promoterai_torch.utils import (
     CSVLogger,
-    WeightDecayScheduler,
+    apply_optimizer_schedule,
     load_pretrained,
-    make_lr_lambda,
 )
 
 
@@ -60,6 +59,34 @@ def _run_epoch(twin_model, loader, optimizer, device, max_steps=None, train=True
     return total_loss / max(n_steps, 1)
 
 
+def save_finetune_checkpoint(
+    twin_model,
+    optimizer,
+    val_loss: float,
+    epoch: int,
+    checkpoint_folder: str,
+    base_args: dict,
+    finetune_args: dict,
+):
+    """Save a load_pretrained-compatible base-model checkpoint from a TwinModel."""
+    args_dict = dict(base_args)
+    args_dict.setdefault(
+        "output_crop", args_dict.get("input_length", 0) - args_dict.get("output_length", 0)
+    )
+    args_dict["finetune_args"] = dict(finetune_args)
+    torch.save(
+        {
+            "model_state_dict": twin_model.base_model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": None,
+            "val_loss": val_loss,
+            "epoch": epoch,
+            "args": args_dict,
+        },
+        os.path.join(checkpoint_folder, "best_model.pt"),
+    )
+
+
 def main():
     """Filter GTEx outlier variants, fine-tune TwinModel, save best base model checkpoint."""
     parser = argparse.ArgumentParser()
@@ -78,7 +105,7 @@ def main():
     twin_model_folder = args.model_checkpoint.replace(".pt", "") + "_finetune"
     os.makedirs(twin_model_folder, exist_ok=True)
 
-    base_model, _ = load_pretrained(args.model_checkpoint, map_location=str(device))
+    base_model, base_args = load_pretrained(args.model_checkpoint, map_location=str(device))
     twin_model = TwinModel(base_model).to(device)
 
     df_var = pd.read_csv(args.var_file, sep="\t")
@@ -93,9 +120,11 @@ def main():
 
     fasta = pyfaidx.Fasta(args.fasta_file)
     ds_train = VariantDataset(
-        df_train, fasta, args.input_length, output_col="z", shuffle=True
+        df_train, fasta, args.input_length, output_col="z", boundary="zeros"
     )
-    ds_valid = VariantDataset(df_valid, fasta, args.input_length, output_col="z")
+    ds_valid = VariantDataset(
+        df_valid, fasta, args.input_length, output_col="z", boundary="zeros"
+    )
 
     loader_train = DataLoader(
         ds_train,
@@ -118,17 +147,15 @@ def main():
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, make_lr_lambda(args.epochs)
-    )
-    wd_scheduler = WeightDecayScheduler(optimizer, args.weight_decay, args.epochs)
-
     # steps_per_epoch = 20% of training data (matching TF len(gen_train) // 5)
     steps_per_epoch = max(1, len(ds_train) // (5 * args.batch_size))
     logger = CSVLogger(os.path.join(twin_model_folder, "logs.csv"))
     best_val_loss = float("inf")
 
     for epoch in range(args.epochs):
+        apply_optimizer_schedule(
+            optimizer, args.learning_rate, args.weight_decay, args.epochs, epoch
+        )
         train_loss = _run_epoch(
             twin_model,
             loader_train,
@@ -139,12 +166,10 @@ def main():
         )
         val_loss = _run_epoch(twin_model, loader_valid, optimizer, device, train=False)
 
-        scheduler.step()
-        wd_scheduler.step(epoch)
-
         lr_now = optimizer.param_groups[0]["lr"]
+        wd_now = optimizer.param_groups[0]["weight_decay"]
         print(
-            f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr_now:.2e}"
+            f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr_now:.2e}  wd={wd_now:.2e}"
         )
         logger.log(
             {
@@ -152,15 +177,20 @@ def main():
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 "lr": lr_now,
+                "wd": wd_now,
             }
         )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            # Save base model (not twin wrapper), matching TF CustomModelCheckpoint behavior
-            torch.save(
-                {"model_state_dict": twin_model.base_model.state_dict()},
-                os.path.join(twin_model_folder, "best_model.pt"),
+            save_finetune_checkpoint(
+                twin_model,
+                optimizer,
+                val_loss,
+                epoch,
+                twin_model_folder,
+                base_args,
+                vars(args),
             )
             print(f"  Saved best model (val_loss={val_loss:.4f})")
 

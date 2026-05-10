@@ -25,7 +25,7 @@ convert = [
     "tf-keras",
 ]
 train = ["h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3"]
-dev = ["pytest>=8", "h5py>=3.0", "scipy>=1.10", "tangermeme>=0.5"]
+dev = ["pytest>=8", "h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3", "tangermeme>=0.5"]
 
 [project.scripts]
 promoterai-torch = "promoterai_torch.cli:main"

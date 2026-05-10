@@ -1,7 +1,14 @@
 import numpy as np
 import pytest  # noqa
+import pandas as pd
+import pyfaidx
 
-from promoterai_torch.dataset import _prepare_sample, onehot_encode
+from promoterai_torch.dataset import (
+    VariantDataset,
+    _prepare_sample,
+    build_weighted_dataloader,
+    onehot_encode,
+)
 
 
 def test_onehot_encode_bases():
@@ -88,3 +95,115 @@ def test_prepare_sample_all_n_zero_weight():
     sw = (True,)
     _, _, w_tuple = _prepare_sample(x, y, 100, 50, sw, augment=False)
     assert w_tuple[0] == 0.0
+
+
+def test_variant_dataset_boundary_zeros_matches_tf_generator(tmp_path):
+    fasta_path = tmp_path / "mini.fa"
+    fasta_path.write_text(">chr1\nACGTACGT\n")
+    fasta = pyfaidx.Fasta(str(fasta_path))
+    df = pd.DataFrame(
+        [{"chrom": "chr1", "pos": 2, "ref": "C", "alt": "A", "z": 1.0}]
+    )
+
+    ds = VariantDataset(df, fasta, input_length=8, output_col="z", boundary="zeros")
+    (x_ref, x_alt), y = ds[0]
+
+    assert y == 1.0
+    assert x_ref.sum() == 0.0
+    assert x_alt.sum() == 0.0
+
+
+def test_variant_dataset_default_padding_still_supports_scoring_near_boundary(tmp_path):
+    fasta_path = tmp_path / "mini.fa"
+    fasta_path.write_text(">chr1\nACGTACGT\n")
+    fasta = pyfaidx.Fasta(str(fasta_path))
+    df = pd.DataFrame(
+        [{"chrom": "chr1", "pos": 2, "ref": "C", "alt": "A", "z": 1.0}]
+    )
+
+    ds = VariantDataset(df, fasta, input_length=8, output_col="z")
+    (x_ref, x_alt), _ = ds[0]
+
+    assert x_ref.sum() > 0.0
+    assert x_alt.sum() > 0.0
+
+
+def test_variant_dataset_rejects_non_acgt_alt(tmp_path):
+    fasta_path = tmp_path / "mini.fa"
+    fasta_path.write_text(">chr1\nACGTACGT\n")
+    fasta = pyfaidx.Fasta(str(fasta_path))
+    df = pd.DataFrame(
+        [{"chrom": "chr1", "pos": 5, "ref": "A", "alt": "N", "z": 1.0}]
+    )
+
+    ds = VariantDataset(df, fasta, input_length=4, output_col="z")
+    (x_ref, x_alt), _ = ds[0]
+
+    assert x_ref.sum() == 0.0
+    assert x_alt.sum() == 0.0
+
+
+class _IndexDataset:
+    def __init__(self, start, length):
+        self.start = start
+        self.length = length
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        return self.start + idx
+
+
+def test_weighted_dataloader_samples_datasets_proportional_to_size():
+    loader = build_weighted_dataloader(
+        [_IndexDataset(0, 2), _IndexDataset(2, 4)],
+        batch_size=1,
+        num_workers=0,
+        num_samples=6000,
+    )
+
+    values = [int(batch.item()) for batch in loader]
+    first_dataset = sum(value < 2 for value in values) / len(values)
+    second_dataset = sum(value >= 2 for value in values) / len(values)
+
+    assert first_dataset == pytest.approx(2 / 6, abs=0.04)
+    assert second_dataset == pytest.approx(4 / 6, abs=0.04)
+
+
+def test_validation_dataloader_is_sequential_without_replacement():
+    loader = build_weighted_dataloader(
+        [_IndexDataset(0, 5)],
+        batch_size=2,
+        num_workers=0,
+        shuffle=False,
+    )
+
+    values = []
+    for batch in loader:
+        values.extend(batch.tolist())
+
+    assert values == [0, 1, 2, 3, 4]
+    assert loader.sampler is None or not hasattr(loader.sampler, "replacement")
+
+
+def test_rank_local_weighted_sampler_uses_equal_sample_counts():
+    loader0 = build_weighted_dataloader(
+        [_IndexDataset(0, 2), _IndexDataset(2, 4)],
+        batch_size=2,
+        num_workers=0,
+        rank=0,
+        world_size=2,
+        num_samples=7,
+    )
+    loader1 = build_weighted_dataloader(
+        [_IndexDataset(0, 2), _IndexDataset(2, 4)],
+        batch_size=2,
+        num_workers=0,
+        rank=1,
+        world_size=2,
+        num_samples=7,
+    )
+
+    assert loader0.sampler.num_samples == 7
+    assert loader1.sampler.num_samples == 7

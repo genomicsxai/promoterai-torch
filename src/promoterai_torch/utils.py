@@ -22,6 +22,21 @@ def make_lr_lambda(total_epochs: int) -> Callable[[int], float]:
     return lr_lambda
 
 
+def apply_optimizer_schedule(
+    optimizer: torch.optim.Optimizer,
+    base_lr: float,
+    base_wd: float,
+    total_epochs: int,
+    epoch: int,
+) -> float:
+    """Apply PromoterAI's epoch-begin LR/WD schedule and return the scale."""
+    scale = make_lr_lambda(total_epochs)(epoch)
+    for pg in optimizer.param_groups:
+        pg["lr"] = base_lr * scale
+        pg["weight_decay"] = base_wd * scale
+    return scale
+
+
 class WeightDecayScheduler:
     """Mirrors the LR schedule for weight_decay (LambdaLR does not touch it)."""
 
@@ -56,7 +71,7 @@ def save_checkpoint(
         {
             "model_state_dict": base.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
             "val_loss": val_loss,
             "epoch": epoch,
             "args": args_dict,

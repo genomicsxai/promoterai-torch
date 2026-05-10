@@ -22,8 +22,7 @@ from promoterai_torch.architecture import PromoterAI
 from promoterai_torch.dataset import SequenceDataset, build_weighted_dataloader
 from promoterai_torch.utils import (
     CSVLogger,
-    WeightDecayScheduler,
-    make_lr_lambda,
+    apply_optimizer_schedule,
     save_checkpoint,
 )
 
@@ -65,7 +64,7 @@ def compute_loss(outputs, y_tuple, w_tuple):
     return loss
 
 
-def _run_epoch(model, loader, optimizer, device, max_steps=None, train=True):
+def _run_epoch(model, loader, optimizer, device, world_size=1, max_steps=None, train=True):
     """Run one train or eval epoch; stops after max_steps batches when set."""
     model.train(train)
     total_loss, n_steps = 0.0, 0
@@ -90,7 +89,10 @@ def _run_epoch(model, loader, optimizer, device, max_steps=None, train=True):
             if max_steps and n_steps >= max_steps:
                 break
 
-    return total_loss / max(n_steps, 1)
+    stats = torch.tensor([total_loss, n_steps], dtype=torch.float64, device=device)
+    if world_size > 1:
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+    return float(stats[0].item() / max(stats[1].item(), 1.0))
 
 
 def main():
@@ -139,6 +141,7 @@ def main():
 
     dataset_sizes = [len(d) for d in train_datasets]
     steps_per_epoch = int(sum(dataset_sizes) / 10)
+    train_samples_per_rank = steps_per_epoch * args.batch_size
 
     val_sw = tuple(k == 0 for k in range(num_species))
     val_dataset = SequenceDataset(
@@ -146,7 +149,12 @@ def main():
     )
 
     train_loader = build_weighted_dataloader(
-        train_datasets, args.batch_size, args.num_workers, rank, world_size
+        train_datasets,
+        args.batch_size,
+        args.num_workers,
+        rank,
+        world_size,
+        num_samples=train_samples_per_rank,
     )
     val_loader = build_weighted_dataloader(
         [val_dataset],
@@ -161,10 +169,6 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, make_lr_lambda(args.epochs)
-    )
-    wd_scheduler = WeightDecayScheduler(optimizer, args.weight_decay, args.epochs)
 
     os.makedirs(args.checkpoint_folder, exist_ok=True)
     logger = CSVLogger(os.path.join(args.checkpoint_folder, "logs.csv"))
@@ -172,25 +176,30 @@ def main():
 
     args_dict = vars(args)
     args_dict["output_dims"] = output_dims
+    args_dict["output_crop"] = args.input_length - args.output_length
 
     for epoch in range(args.epochs):
+        apply_optimizer_schedule(
+            optimizer, args.learning_rate, args.weight_decay, args.epochs, epoch
+        )
         train_loss = _run_epoch(
             model,
             train_loader,
             optimizer,
             device,
+            world_size=world_size,
             max_steps=steps_per_epoch,
             train=True,
         )
-        val_loss = _run_epoch(model, val_loader, optimizer, device, train=False)
-
-        scheduler.step()
-        wd_scheduler.step(epoch)
+        val_loss = _run_epoch(
+            model, val_loader, optimizer, device, world_size=world_size, train=False
+        )
 
         if rank == 0:
             lr_now = optimizer.param_groups[0]["lr"]
+            wd_now = optimizer.param_groups[0]["weight_decay"]
             print(
-                f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr_now:.2e}"
+                f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr_now:.2e}  wd={wd_now:.2e}"
             )
             logger.log(
                 {
@@ -198,6 +207,7 @@ def main():
                     "train_loss": train_loss,
                     "val_loss": val_loss,
                     "lr": lr_now,
+                    "wd": wd_now,
                 }
             )
 
@@ -206,7 +216,7 @@ def main():
                 save_checkpoint(
                     model,
                     optimizer,
-                    scheduler,
+                    None,
                     val_loss,
                     epoch,
                     args.checkpoint_folder,

@@ -8,7 +8,6 @@ from torch.utils.data import (
     ConcatDataset,
     DataLoader,
     Dataset,
-    DistributedSampler,
     WeightedRandomSampler,
 )
 
@@ -205,6 +204,10 @@ class VariantDataset(Dataset):
             print(f"Skipping {chrom}:{pos} {ref_allele}>{alt_allele} (ref issue)")
             return _zero()
 
+        if not set(alt_allele).issubset({"A", "C", "G", "T"}):
+            print(f"Skipping {chrom}:{pos} {ref_allele}>{alt_allele} (alt issue)")
+            return _zero()
+
         # Construct alt sequence
         seq_alt_str = (
             seq_ref_str[:center] + alt_allele + seq_ref_str[center + len(ref_allele) :]
@@ -231,6 +234,7 @@ def build_weighted_dataloader(
     rank: int = 0,
     world_size: int = 1,
     shuffle: bool = True,
+    num_samples: int | None = None,
 ) -> DataLoader:
     """
     Combine multiple SequenceDatasets with weights proportional to dataset size,
@@ -238,31 +242,30 @@ def build_weighted_dataloader(
     """
     sizes = [len(d) for d in datasets]
     total = sum(sizes)
-    weights = []
-    for size, ds in zip(sizes, datasets):
-        w = size / total
-        weights.extend([w] * len(ds))
-    weights = torch.tensor(weights, dtype=torch.float64)
-
     combined = ConcatDataset(datasets)
 
-    if world_size > 1:
-        sampler = DistributedSampler(
-            combined, num_replicas=world_size, rank=rank, shuffle=shuffle
-        )
+    if not shuffle:
         return DataLoader(
             combined,
             batch_size=batch_size,
-            sampler=sampler,
+            shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
         )
-    else:
-        sampler = WeightedRandomSampler(weights, num_samples=total, replacement=True)
-        return DataLoader(
-            combined,
-            batch_size=batch_size,
-            sampler=sampler,
-            num_workers=num_workers,
-            pin_memory=True,
-        )
+
+    # Equal per-sample weights produce dataset-level probabilities size_i / total,
+    # matching tf.data.Dataset.sample_from_datasets(..., weights=dataset_sizes).
+    weights = torch.ones(total, dtype=torch.float64)
+    samples_per_rank = num_samples if num_samples is not None else total
+    generator = torch.Generator()
+    generator.manual_seed(torch.initial_seed() + rank)
+    sampler = WeightedRandomSampler(
+        weights, num_samples=samples_per_rank, replacement=True, generator=generator
+    )
+    return DataLoader(
+        combined,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+    )

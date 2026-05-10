@@ -1,6 +1,10 @@
 """
 Preprocess TSS annotations + genome FASTA + BigWig tracks into HDF5 files.
 
+This mirrors the original PromoterAI TFRecord preprocessing semantics, but writes
+HDF5 files for the PyTorch training pipeline. The BigWig TSV must contain
+`fwd`, `rev`, and `xform` columns.
+
 Usage:
     python -m promoterai_torch.preprocess \
         --hdf5_folder <out> --tss_file data/annotation/tss_hg38.tsv \
@@ -20,11 +24,6 @@ import pyfaidx
 from promoterai_torch.dataset import onehot_encode
 
 
-def _arcsinh(x):
-    """Apply arcsinh transform after replacing NaN with 0."""
-    return np.arcsinh(np.nan_to_num(x, nan=0.0))
-
-
 def _extract_bigwig(bw, chrom, start, end):
     """Fetch values from a BigWig handle; returns zeros on any error or missing region."""
     try:
@@ -35,6 +34,11 @@ def _extract_bigwig(bw, chrom, start, end):
         return vals
     except Exception:
         return np.zeros(end - start, dtype="float32")
+
+
+def _compile_xform(expr: str):
+    """Compile a BigWig transform expression from the original PromoterAI TSV."""
+    return eval(expr, {"np": np, "__builtins__": {}})  # noqa: S307 - original API is expressions
 
 
 def make_hdf5_file(hdf5_file: str, xs: np.ndarray, ys: np.ndarray):
@@ -66,14 +70,19 @@ def preprocess_chrom(
         print(f"No TSS entries for {chrom}, skipping.")
         return
 
-    df_bw = pd.read_csv(
-        bigwig_files_tsv, sep="\t", header=None, names=["path", "strand"]
-    )
+    df_bw = pd.read_csv(bigwig_files_tsv, sep="\t")
+    required_cols = {"fwd", "rev", "xform"}
+    missing = required_cols - set(df_bw.columns)
+    if missing:
+        raise ValueError(
+            f"bigwig_files must contain columns {sorted(required_cols)}, "
+            f"missing {sorted(missing)}"
+        )
 
     fasta = pyfaidx.Fasta(fasta_file)
-    bws_fwd = [pyBigWig.open(p) for p in df_bw[df_bw["strand"] != "-1"]["path"]]
-    bws_rev = [pyBigWig.open(p) for p in df_bw[df_bw["strand"] == "-1"]["path"]]
-    all_bws = [(bw, "+") for bw in bws_fwd] + [(bw, "-") for bw in bws_rev]
+    bws_fwd = [pyBigWig.open(p) for p in df_bw["fwd"]]
+    bws_rev = [pyBigWig.open(p) for p in df_bw["rev"]]
+    bw_xforms = [_compile_xform(expr) for expr in df_bw["xform"]]
 
     half_in = input_length // 2
     half_out = output_length // 2
@@ -102,16 +111,19 @@ def preprocess_chrom(
             continue
         x = onehot_encode(seq_str)
 
+        is_minus = strand in (-1, "-1", "-")
         tracks = []
-        for bw, bw_strand in all_bws:
+        for j, (bw_fwd, bw_rev, xform) in enumerate(zip(bws_fwd, bws_rev, bw_xforms)):
+            bw = bw_rev if is_minus else bw_fwd
             vals = _extract_bigwig(bw, chrom, pos - half_out, pos + half_out)
             if len(vals) < output_length:
                 vals = np.pad(vals, (0, output_length - len(vals)))
-            vals = _arcsinh(vals[:output_length])
+            vals = xform(vals[:output_length])
+            vals = np.asarray(vals, dtype="float32")
             tracks.append(vals)
         y = np.stack(tracks, axis=-1)  # (output_length, n_tracks)
 
-        if strand in (-1, "-1", "-"):
+        if is_minus:
             x = x[::-1, ::-1].copy()
             y = y[::-1, :].copy()
 
@@ -123,7 +135,7 @@ def preprocess_chrom(
 
     flush(force=True)
 
-    for bw, _ in all_bws:
+    for bw in bws_fwd + bws_rev:
         bw.close()
     print(f"Preprocessing complete for {chrom}: {chunk_idx} HDF5 files written.")
 

@@ -8,7 +8,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
-sys.path.insert(0, str(EXAMPLES))
+TRACK_BENCHMARK = EXAMPLES / "track_benchmark"
+sys.path.insert(0, str(TRACK_BENCHMARK))
 
 from compare_tf_torch_tracks_promoters import (  # noqa: E402
     Promoter,
@@ -101,14 +102,14 @@ def test_parse_promoter_spec():
 
 def test_track_parity_scripts_expose_cli_help():
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(EXAMPLES)])
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(TRACK_BENCHMARK)])
 
     for script in (
         "compare_tf_torch_tracks_random.py",
         "compare_tf_torch_tracks_promoters.py",
     ):
         result = subprocess.run(
-            [sys.executable, str(EXAMPLES / script), "--help"],
+            [sys.executable, str(TRACK_BENCHMARK / script), "--help"],
             check=True,
             capture_output=True,
             text=True,

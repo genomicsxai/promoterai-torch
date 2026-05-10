@@ -53,6 +53,45 @@ promoterai-torch score \
 
 Scores are written by default to `variants.{model_name}.tsv` as a new `score` column in [−1, 1] (or to a file path provided by `--output`). Thresholds: ±0.1 (weak effect), ±0.2 (moderate), ±0.5 (strong).
 
+### Benchmark variant scores
+
+The public benchmark variant sets from
+[Illumina/PromoterAI](https://github.com/Illumina/PromoterAI/tree/master/data/benchmark)
+can be downloaded and scored with the two fine-tuned torch checkpoints. The
+benchmark script averages the signed `hg38_finetune` and `hg38_mm10_finetune`
+variant scores, then reports under/over, under/null, and over/null AUROCs:
+
+```sh
+python examples/paper_benchmark/download_benchmark_data.py \
+    --output_dir data/benchmark
+
+python examples/paper_benchmark/benchmark_variant_scores.py \
+    --benchmark_dir data/benchmark \
+    --hg38_finetune_checkpoint models/promoterAI_v1_hg38_finetune.pt \
+    --hg38_mm10_finetune_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
+    --fasta_file hg38.fa \
+    --output_dir results/benchmark \
+    --batch_size 2 \
+    --device cuda
+```
+
+Per-dataset scored TSVs are written to `results/benchmark/*.scores.tsv`, and
+the AUROC summary is written to `results/benchmark/benchmark_aurocs.tsv`.
+Run one or more datasets by adding `--dataset GTEx_outlier` (repeatable). To
+split each dataset across multiple GPUs, pass a device list:
+
+```sh
+python examples/paper_benchmark/benchmark_variant_scores.py \
+    --benchmark_dir data/benchmark \
+    --dataset GTEx_outlier \
+    --hg38_finetune_checkpoint models/promoterAI_v1_hg38_finetune.pt \
+    --hg38_mm10_finetune_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
+    --fasta_file hg38.fa \
+    --output_dir results/benchmark/GTEx_outlier \
+    --batch_size 2 \
+    --devices cuda:0 cuda:1 cuda:2 cuda:3
+```
+
 ### Run inference on a genomic sequence
 
 One can also generate predictions for all the tracks that PromoterAI was trained on (these are aggregated and diff'ed to generate the variant scores).
@@ -145,7 +184,7 @@ Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the origin
 The example scripts can also compare the full predicted regulatory tracks from the original TF/Keras SavedModel and the converted PyTorch checkpoint. This reports mean and max absolute error per input sequence and output head.
 
 ```sh
-python examples/compare_tf_torch_tracks_promoters.py \
+python examples/track_benchmark/compare_tf_torch_tracks_promoters.py \
     --keras_model models/promoterAI_v1_hg38_mm10_finetune \
     --torch_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
     --fasta hg38.fa \
@@ -153,7 +192,7 @@ python examples/compare_tf_torch_tracks_promoters.py \
     --promoter TERT:chr5:1294988:- \
     --promoter SFSWAP:chr12:131710589:+
 
-python examples/compare_tf_torch_tracks_random.py \
+python examples/track_benchmark/compare_tf_torch_tracks_random.py \
     --keras_model models/promoterAI_v1_hg38_mm10_finetune \
     --torch_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
     --n_sequences 8 \

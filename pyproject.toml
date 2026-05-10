@@ -25,6 +25,7 @@ convert = [
     "tf-keras",
 ]
 train = ["h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3"]
+wandb = ["wandb>=0.16"]
 dev = ["pytest>=8", "h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3", "tangermeme>=0.5"]
 
 [project.scripts]

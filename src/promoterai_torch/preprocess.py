@@ -18,10 +18,14 @@ import os
 import h5py
 import numpy as np
 import pandas as pd
-import pyBigWig
 import pyfaidx
 
 from promoterai_torch.dataset import onehot_encode
+
+try:
+    import pyBigWig
+except ImportError as _pybigwig_import_error:
+    pyBigWig = None
 
 
 def _extract_bigwig(bw, chrom, start, end):
@@ -80,6 +84,11 @@ def preprocess_chrom(
         )
 
     fasta = pyfaidx.Fasta(fasta_file)
+    if pyBigWig is None:
+        raise ImportError(
+            "pyBigWig is required for preprocessing. "
+            'Install with: pip install "promoterai-torch[train]"'
+        ) from _pybigwig_import_error
     bws_fwd = [pyBigWig.open(p) for p in df_bw["fwd"]]
     bws_rev = [pyBigWig.open(p) for p in df_bw["rev"]]
     bw_xforms = [_compile_xform(expr) for expr in df_bw["xform"]]

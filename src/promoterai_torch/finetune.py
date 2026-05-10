@@ -23,7 +23,11 @@ from promoterai_torch.architecture import TwinModel
 from promoterai_torch.dataset import VariantDataset
 from promoterai_torch.utils import (
     CSVLogger,
+    add_wandb_args,
     apply_optimizer_schedule,
+    finish_wandb,
+    init_wandb,
+    log_wandb,
     load_pretrained,
 )
 
@@ -99,6 +103,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=5e-6)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)
+    add_wandb_args(parser)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -151,6 +156,11 @@ def main():
     steps_per_epoch = max(1, len(ds_train) // (5 * args.batch_size))
     logger = CSVLogger(os.path.join(twin_model_folder, "logs.csv"))
     best_val_loss = float("inf")
+    wandb_config = dict(base_args)
+    wandb_config["finetune_args"] = vars(args)
+    wandb_config["n_train_variants"] = len(ds_train)
+    wandb_config["n_val_variants"] = len(ds_valid)
+    wandb_run = init_wandb(args, wandb_config)
 
     for epoch in range(args.epochs):
         apply_optimizer_schedule(
@@ -168,20 +178,23 @@ def main():
 
         lr_now = optimizer.param_groups[0]["lr"]
         wd_now = optimizer.param_groups[0]["weight_decay"]
+        checkpoint_saved = val_loss < best_val_loss
         print(
             f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr_now:.2e}  wd={wd_now:.2e}"
         )
-        logger.log(
-            {
-                "epoch": epoch + 1,
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "lr": lr_now,
-                "wd": wd_now,
-            }
-        )
+        row = {
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "lr": lr_now,
+            "wd": wd_now,
+            "best_val_loss": min(best_val_loss, val_loss),
+            "checkpoint_saved": int(checkpoint_saved),
+        }
+        logger.log(row)
+        log_wandb(wandb_run, row, step=epoch + 1)
 
-        if val_loss < best_val_loss:
+        if checkpoint_saved:
             best_val_loss = val_loss
             save_finetune_checkpoint(
                 twin_model,
@@ -193,6 +206,8 @@ def main():
                 vars(args),
             )
             print(f"  Saved best model (val_loss={val_loss:.4f})")
+
+    finish_wandb(wandb_run)
 
 
 if __name__ == "__main__":

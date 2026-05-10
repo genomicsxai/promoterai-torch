@@ -1,7 +1,15 @@
 import pytest
 import torch
+import sys
+import types
 
-from promoterai_torch.utils import apply_optimizer_schedule, make_lr_lambda
+from promoterai_torch.utils import (
+    apply_optimizer_schedule,
+    finish_wandb,
+    init_wandb,
+    log_wandb,
+    make_lr_lambda,
+)
 
 
 def test_lr_schedule_warmup():
@@ -57,3 +65,69 @@ def test_apply_optimizer_schedule_updates_lr_and_weight_decay_at_epoch_begin():
     assert scale == pytest.approx(0.1)
     assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(5e-7)
+
+
+def test_init_wandb_noops_without_project_or_on_nonzero_rank():
+    args = types.SimpleNamespace(wandb_project=None, wandb_mode=None)
+
+    assert init_wandb(args, {"x": 1}, rank=0) is None
+    args.wandb_project = "project"
+    assert init_wandb(args, {"x": 1}, rank=1) is None
+    args.wandb_mode = "disabled"
+    assert init_wandb(args, {"x": 1}, rank=0) is None
+
+
+def test_init_wandb_imports_optional_dependency_and_forwards_config(monkeypatch):
+    calls = {}
+
+    class FakeRun:
+        pass
+
+    def fake_init(**kwargs):
+        calls.update(kwargs)
+        return FakeRun()
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(init=fake_init))
+    args = types.SimpleNamespace(
+        wandb_project="promoterai",
+        wandb_entity="lab",
+        wandb_run_name="run-1",
+        wandb_mode="offline",
+        wandb_tags=["train", "smoke"],
+    )
+    config = {"epochs": 3}
+
+    run = init_wandb(args, config, rank=0)
+
+    assert isinstance(run, FakeRun)
+    assert calls == {
+        "project": "promoterai",
+        "entity": "lab",
+        "name": "run-1",
+        "mode": "offline",
+        "tags": ["train", "smoke"],
+        "config": config,
+    }
+
+
+def test_wandb_log_and_finish_delegate_to_run():
+    class FakeRun:
+        def __init__(self):
+            self.logged = []
+            self.finished = False
+
+        def log(self, metrics, step=None):
+            self.logged.append((metrics, step))
+
+        def finish(self):
+            self.finished = True
+
+    run = FakeRun()
+
+    log_wandb(run, {"loss": 0.5}, step=2)
+    finish_wandb(run)
+    log_wandb(None, {"ignored": True}, step=3)
+    finish_wandb(None)
+
+    assert run.logged == [({"loss": 0.5}, 2)]
+    assert run.finished

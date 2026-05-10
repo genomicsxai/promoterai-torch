@@ -22,7 +22,11 @@ from promoterai_torch.architecture import PromoterAI
 from promoterai_torch.dataset import SequenceDataset, build_weighted_dataloader
 from promoterai_torch.utils import (
     CSVLogger,
+    add_wandb_args,
     apply_optimizer_schedule,
+    finish_wandb,
+    init_wandb,
+    log_wandb,
     save_checkpoint,
 )
 
@@ -110,6 +114,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=5e-6)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)
+    add_wandb_args(parser)
     args = parser.parse_args()
 
     rank, world_size, device = setup_distributed()
@@ -177,6 +182,8 @@ def main():
     args_dict = vars(args)
     args_dict["output_dims"] = output_dims
     args_dict["output_crop"] = args.input_length - args.output_length
+    args_dict["dataset_sizes"] = dataset_sizes
+    wandb_run = init_wandb(args, args_dict, rank=rank)
 
     for epoch in range(args.epochs):
         apply_optimizer_schedule(
@@ -198,20 +205,23 @@ def main():
         if rank == 0:
             lr_now = optimizer.param_groups[0]["lr"]
             wd_now = optimizer.param_groups[0]["weight_decay"]
+            checkpoint_saved = val_loss < best_val_loss
             print(
                 f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr_now:.2e}  wd={wd_now:.2e}"
             )
-            logger.log(
-                {
-                    "epoch": epoch + 1,
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "lr": lr_now,
-                    "wd": wd_now,
-                }
-            )
+            row = {
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "lr": lr_now,
+                "wd": wd_now,
+                "best_val_loss": min(best_val_loss, val_loss),
+                "checkpoint_saved": int(checkpoint_saved),
+            }
+            logger.log(row)
+            log_wandb(wandb_run, row, step=epoch + 1)
 
-            if val_loss < best_val_loss:
+            if checkpoint_saved:
                 best_val_loss = val_loss
                 save_checkpoint(
                     model,
@@ -223,6 +233,7 @@ def main():
                     args_dict,
                 )
 
+    finish_wandb(wandb_run)
     if world_size > 1:
         dist.destroy_process_group()
 

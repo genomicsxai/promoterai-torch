@@ -15,24 +15,12 @@ If you already have a PromoterAI-torch model and only wish to run inference/inte
 
 ```sh
 pip install promoterai-torch
-# or with uv:
-uv add promoterai-torch
 ```
 
 Converting a pretrained Keras/TensorFlow SavedModel (including the official releases from Illumina) requires additional TensorFlow dependencies:
 
 ```sh
 pip install "promoterai-torch[convert]"
-# or with uv:
-uv add "promoterai-torch[convert]"
-```
-
-Fine-tuning or training from scratch using the built-in scripts requires a couple extra dependencies for data preprocessing:
-
-```sh
-pip install "promoterai-torch[train]"
-# or with uv:
-uv add "promoterai-torch[train]"
 ```
 
 ## Convert a pretrained Keras model
@@ -49,7 +37,7 @@ promoterai-torch convert \
 
 Architecture parameters (`num_blocks`, `model_dim`, `output_dims`) are inferred automatically from the Keras model. `--input_length` and `--output_length` are optional metadata.
 
-## Quick start
+## Usage
 
 ### Score variants
 
@@ -179,27 +167,46 @@ runs where both runtimes fit in GPU memory.
 
 Errors are ~1e-7 (<1e-4) when run at FP32, i.e., within machine precision, when comparing all four official TF/Keras SavedModels (`hg38`, `hg38_mm10`, `hg38_finetune`, and `hg38_mm10_finetune`) against their PyTorch checkpoints.
 
-## Training from scratch
+## Training models
 
 > [!Warning]
 > This functionality is completely untested; I have not verified whether any of this runs or is correct. I may eventually need to use it, at which point this will receive more careful testing and development.
 
-Preprocess one chromosome at a time (parallelizable), then train:
+Fine-tuning or training from scratch using the built-in scripts requires a couple extra dependencies for data preprocessing:
+
+```sh
+pip install "promoterai-torch[train]"
+```
+
+Weights & Biases logging is optional for training and fine-tuning:
+
+```sh
+pip install "promoterai-torch[wandb]"
+```
+
+### Data preprocessing
+
+We follow the original PromoterAI's repo and preprocess track and sequence data into chunks for training. This needs to be done separately for each chromosome, e.g.
 
 ```sh
 promoterai-torch preprocess \
     --hdf5_folder data/hdf5/human --tss_file tss_hg38.tsv \
     --fasta_file hg38.fa --bigwig_files hg38_tracks.tsv \
     --chrom chr1 --input_length 32768 --output_length 16384
+```
 
+Once done, you can then train on this dataset.
+
+```sh
 promoterai-torch train \
     --checkpoint_folder checkpoints/run1 \
     --hdf5_human_folder data/hdf5/human \
     --input_length 20480 --output_length 4096 \
-    --num_blocks 24 --model_dim 1024 --batch_size 32
+    --num_blocks 24 --model_dim 1024 --batch_size 32 \
+    --wandb_project promoterai-torch
 ```
 
-Multi-GPU via `torchrun`:
+Multi-GPU training is supported via `torchrun`:
 
 ```sh
 torchrun --nproc_per_node=4 -m promoterai_torch.train \
@@ -219,7 +226,8 @@ promoterai-torch finetune \
     --fasta_file hg38.fa \
     --input_length 20480 \
     --batch_size 8 \
-    --epochs 100
+    --epochs 100 \
+    --wandb_project promoterai-torch --wandb_run_name gtex-finetune
 ```
 
 The fine-tuned base model is saved to `best_model_finetune/best_model.pt`. Only the first output head is trained; all other weights are frozen.

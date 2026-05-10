@@ -11,6 +11,8 @@ Usage:
 import argparse
 import sys
 
+from promoterai_torch.utils import add_wandb_args
+
 
 def main():
     """Dispatch to the appropriate subcommand (preprocess, train, finetune, convert, score)."""
@@ -51,6 +53,7 @@ def main():
     p_train.add_argument("--weight_decay", type=float, default=5e-6)
     p_train.add_argument("--epochs", type=int, default=100)
     p_train.add_argument("--num_workers", type=int, default=4)
+    add_wandb_args(p_train)
 
     # ── finetune ──────────────────────────────────────────────────────────────
     p_ft = sub.add_parser("finetune", help="Fine-tune on GTEx rare variant outliers")
@@ -63,6 +66,7 @@ def main():
     p_ft.add_argument("--weight_decay", type=float, default=5e-6)
     p_ft.add_argument("--epochs", type=int, default=100)
     p_ft.add_argument("--num_workers", type=int, default=4)
+    add_wandb_args(p_ft)
 
     # ── convert ───────────────────────────────────────────────────────────────
     p_conv = sub.add_parser(

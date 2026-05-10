@@ -1,6 +1,7 @@
 import h5py
 import numpy as np
 import pandas as pd
+import types
 
 from promoterai_torch import preprocess
 from promoterai_torch.dataset import onehot_encode
@@ -40,7 +41,7 @@ def test_preprocess_uses_stranded_bigwigs_xforms_and_reverses_minus(tmp_path, mo
         opened[path] = FakeBigWig(values)
         return opened[path]
 
-    monkeypatch.setattr(preprocess.pyBigWig, "open", fake_open)
+    monkeypatch.setattr(preprocess, "pyBigWig", types.SimpleNamespace(open=fake_open))
 
     out_dir = tmp_path / "h5"
     preprocess.preprocess_chrom(

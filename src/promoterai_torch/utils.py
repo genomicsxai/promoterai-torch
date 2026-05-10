@@ -116,6 +116,58 @@ class CSVLogger:
             writer.writerow(row)
 
 
+def add_wandb_args(parser):
+    """Add optional Weights & Biases logging arguments to a training parser."""
+    parser.add_argument("--wandb_project", default=None)
+    parser.add_argument("--wandb_entity", default=None)
+    parser.add_argument("--wandb_run_name", default=None)
+    parser.add_argument(
+        "--wandb_mode", choices=("online", "offline", "disabled"), default=None
+    )
+    parser.add_argument("--wandb_tags", nargs="*", default=[])
+
+
+def init_wandb(args, config: dict, rank: int = 0):
+    """Initialize wandb on rank 0 when --wandb_project is provided."""
+    if rank != 0:
+        return None
+    if getattr(args, "wandb_mode", None) == "disabled":
+        return None
+    project = getattr(args, "wandb_project", None)
+    if not project:
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise ImportError(
+            "wandb logging requires the optional wandb dependency. "
+            'Install with: pip install "promoterai-torch[wandb]"'
+        ) from exc
+
+    init_kwargs = {
+        "project": project,
+        "entity": getattr(args, "wandb_entity", None),
+        "name": getattr(args, "wandb_run_name", None),
+        "mode": getattr(args, "wandb_mode", None),
+        "tags": getattr(args, "wandb_tags", None) or None,
+        "config": config,
+    }
+    init_kwargs = {k: v for k, v in init_kwargs.items() if v is not None}
+    return wandb.init(**init_kwargs)
+
+
+def log_wandb(run, metrics: dict, step: int | None = None):
+    """Log metrics to an optional wandb run."""
+    if run is not None:
+        run.log(metrics, step=step)
+
+
+def finish_wandb(run):
+    """Finish an optional wandb run."""
+    if run is not None:
+        run.finish()
+
+
 def convert_tf_weights(
     keras_model_path: str,
     output_pt_path: str,

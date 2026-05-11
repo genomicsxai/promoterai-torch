@@ -55,16 +55,30 @@ def build_model(args, output_dims, device, world_size, rank):
     return model
 
 
+def load_training_checkpoint(model, optimizer, checkpoint_path: str, device):
+    """Restore model/optimizer state and return (start_epoch, best_val_loss, args)."""
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    base = model.module if hasattr(model, "module") else model
+    base.load_state_dict(ckpt["model_state_dict"])
+    if ckpt.get("optimizer_state_dict") is not None:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    start_epoch = int(ckpt.get("epoch", -1)) + 1
+    best_val_loss = float(ckpt.get("best_val_loss", ckpt.get("val_loss", float("inf"))))
+    return start_epoch, best_val_loss, ckpt.get("args", {})
+
+
 def compute_loss(outputs, y_tuple, w_tuple):
     """Compute per-species weighted MSE loss; skips species whose y has only 1 track (dummy)."""
     loss = torch.tensor(0.0, device=outputs[0].device)
-    for j, (y_pred, y_true, w) in enumerate(zip(outputs, y_tuple, w_tuple)):
+    if w_tuple.dim() == 1:
+        w_tuple = w_tuple.unsqueeze(0)
+    for j, (y_pred, y_true) in enumerate(zip(outputs, y_tuple)):
         if y_true.shape[-1] == 1:
             continue  # dummy target for non-matching species
         per_sample = F.mse_loss(y_pred, y_true, reduction="none").mean(
             dim=(1, 2)
         )  # (B,)
-        loss = loss + (per_sample * w[:, j]).mean()
+        loss = loss + (per_sample * w_tuple[:, j]).mean()
     return loss
 
 
@@ -114,6 +128,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=5e-6)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--resume_checkpoint", default=None)
     add_wandb_args(parser)
     args = parser.parse_args()
 
@@ -177,15 +192,25 @@ def main():
 
     os.makedirs(args.checkpoint_folder, exist_ok=True)
     logger = CSVLogger(os.path.join(args.checkpoint_folder, "logs.csv"))
+    start_epoch = 0
     best_val_loss = float("inf")
+    if args.resume_checkpoint:
+        start_epoch, best_val_loss, _ = load_training_checkpoint(
+            model, optimizer, args.resume_checkpoint, device
+        )
+        if rank == 0:
+            print(
+                f"Resumed training from {args.resume_checkpoint} at epoch {start_epoch + 1}; best_val_loss={best_val_loss:.4f}"
+            )
 
     args_dict = vars(args)
     args_dict["output_dims"] = output_dims
     args_dict["output_crop"] = args.input_length - args.output_length
     args_dict["dataset_sizes"] = dataset_sizes
+    args_dict["start_epoch"] = start_epoch
     wandb_run = init_wandb(args, args_dict, rank=rank)
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         apply_optimizer_schedule(
             optimizer, args.learning_rate, args.weight_decay, args.epochs, epoch
         )
@@ -206,6 +231,7 @@ def main():
             lr_now = optimizer.param_groups[0]["lr"]
             wd_now = optimizer.param_groups[0]["weight_decay"]
             checkpoint_saved = val_loss < best_val_loss
+            next_best_val_loss = min(best_val_loss, val_loss)
             print(
                 f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr_now:.2e}  wd={wd_now:.2e}"
             )
@@ -215,14 +241,14 @@ def main():
                 "val_loss": val_loss,
                 "lr": lr_now,
                 "wd": wd_now,
-                "best_val_loss": min(best_val_loss, val_loss),
+                "best_val_loss": next_best_val_loss,
                 "checkpoint_saved": int(checkpoint_saved),
             }
             logger.log(row)
             log_wandb(wandb_run, row, step=epoch + 1)
 
             if checkpoint_saved:
-                best_val_loss = val_loss
+                best_val_loss = next_best_val_loss
                 save_checkpoint(
                     model,
                     optimizer,
@@ -231,7 +257,20 @@ def main():
                     epoch,
                     args.checkpoint_folder,
                     args_dict,
+                    checkpoint_name="best_model.pt",
+                    best_val_loss=best_val_loss,
                 )
+            save_checkpoint(
+                model,
+                optimizer,
+                None,
+                val_loss,
+                epoch,
+                args.checkpoint_folder,
+                args_dict,
+                checkpoint_name="latest_model.pt",
+                best_val_loss=best_val_loss,
+            )
 
     finish_wandb(wandb_run)
     if world_size > 1:

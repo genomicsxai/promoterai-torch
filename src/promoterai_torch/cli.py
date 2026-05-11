@@ -6,6 +6,7 @@ Usage:
     promoterai-torch train       [args]
     promoterai-torch finetune    [args]
     promoterai-torch score       [args]
+    promoterai-torch check-hdf5  [args]
 """
 
 import argparse
@@ -53,6 +54,7 @@ def main():
     p_train.add_argument("--weight_decay", type=float, default=5e-6)
     p_train.add_argument("--epochs", type=int, default=100)
     p_train.add_argument("--num_workers", type=int, default=4)
+    p_train.add_argument("--resume_checkpoint", default=None)
     add_wandb_args(p_train)
 
     # ── finetune ──────────────────────────────────────────────────────────────
@@ -111,6 +113,13 @@ def main():
     )
     p_score.add_argument("-v", "--verbose", action="store_true", default=False)
 
+    # ── check-hdf5 ───────────────────────────────────────────────────────────
+    p_check = sub.add_parser(
+        "check-hdf5", help="Check HDF5 training chunks for corruption"
+    )
+    p_check.add_argument("--paths", nargs="+", required=True)
+    p_check.add_argument("--full-read", action="store_true", default=False)
+
     args = parser.parse_args()
 
     if args.command == "preprocess":
@@ -156,6 +165,11 @@ def main():
 
         _run_submodule_main(_main, args)
 
+    elif args.command == "check-hdf5":
+        from promoterai_torch.check_hdf5 import main as _main
+
+        sys.exit(_main(args_to_argv(args)))
+
 
 def _run_submodule_main(main_fn, args):
     """Patch sys.argv from parsed args so submodule main() functions re-parse cleanly."""
@@ -176,3 +190,23 @@ def _run_submodule_main(main_fn, args):
             argv += [f"--{k}", str(v)]
     sys.argv = [sys.argv[0]] + argv
     main_fn()
+
+
+def args_to_argv(args):
+    """Convert parsed args back to CLI-style argv for small utility subcommands."""
+    d = vars(args).copy()
+    d.pop("command", None)
+    argv = []
+    for k, v in d.items():
+        flag = f"--{k.replace('_', '-')}"
+        if v is None:
+            continue
+        if isinstance(v, list):
+            if v:
+                argv += [flag] + [str(i) for i in v]
+        elif isinstance(v, bool):
+            if v:
+                argv.append(flag)
+        else:
+            argv += [flag, str(v)]
+    return argv

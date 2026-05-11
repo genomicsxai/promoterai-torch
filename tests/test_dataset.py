@@ -2,13 +2,16 @@ import numpy as np
 import pytest  # noqa
 import pandas as pd
 import pyfaidx
+import h5py
 
 from promoterai_torch.dataset import (
+    SequenceDataset,
     VariantDataset,
     _prepare_sample,
     build_weighted_dataloader,
     onehot_encode,
 )
+import promoterai_torch.dataset as dataset_module
 
 
 def test_onehot_encode_bases():
@@ -95,6 +98,27 @@ def test_prepare_sample_all_n_zero_weight():
     sw = (True,)
     _, _, w_tuple = _prepare_sample(x, y, 100, 50, sw, augment=False)
     assert w_tuple[0] == 0.0
+
+
+def test_sequence_dataset_reverse_augmentation_returns_positive_stride_tensors(
+    tmp_path, monkeypatch
+):
+    h5_path = tmp_path / "train.h5"
+    with h5py.File(h5_path, "w") as handle:
+        handle.create_dataset("x", data=onehot_encode("ACGT" * 50)[None, :, :])
+        handle.create_dataset(
+            "y", data=np.arange(200, dtype="float32").reshape(1, 100, 2)
+        )
+    monkeypatch.setattr(dataset_module, "_truncated_normal", lambda stddev: 0.0)
+    monkeypatch.setattr(dataset_module.np.random, "uniform", lambda: 0.0)
+
+    ds = SequenceDataset([str(h5_path)], 100, 50, (True,), augment=True)
+    x_t, y_t, _ = ds[0]
+
+    assert x_t.shape == (100, 4)
+    assert y_t[0].shape == (50, 2)
+    assert all(stride > 0 for stride in x_t.stride())
+    assert all(stride > 0 for stride in y_t[0].stride())
 
 
 def test_variant_dataset_boundary_zeros_matches_tf_generator(tmp_path):

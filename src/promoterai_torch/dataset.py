@@ -72,6 +72,8 @@ def _prepare_sample(
     y_end = shift - oc2 if shift != oc2 else None
     x_crop = x[shift + ic2 : x_end][::strand, ::strand]
     y_crop = y[shift + oc2 : y_end][::strand]
+    x_crop = np.ascontiguousarray(x_crop)
+    y_crop = np.ascontiguousarray(y_crop)
 
     y_tuple = tuple(
         y_crop if sw else np.array([[0.0]], dtype="float32") for sw in sample_weight

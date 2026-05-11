@@ -236,6 +236,16 @@ promoterai-torch preprocess \
 
 Once done, you can then train on this dataset.
 
+Check the generated chunks before launching a long run:
+
+```sh
+promoterai-torch check-hdf5 \
+    --paths data/hdf5/human data/hdf5/mouse
+```
+
+Add `--full-read` to read every `x` and `y` dataset value instead of the default
+first/last-row check.
+
 ```sh
 promoterai-torch train \
     --checkpoint_folder checkpoints/run1 \
@@ -243,6 +253,18 @@ promoterai-torch train \
     --input_length 20480 --output_length 4096 \
     --num_blocks 24 --model_dim 1024 --batch_size 32 \
     --wandb_project promoterai-torch
+```
+
+Training writes `best_model.pt` when validation improves and `latest_model.pt`
+after every epoch. Resume a pre-empted run explicitly:
+
+```sh
+promoterai-torch train \
+    --checkpoint_folder checkpoints/run1 \
+    --hdf5_human_folder data/hdf5/human \
+    --input_length 20480 --output_length 4096 \
+    --num_blocks 24 --model_dim 1024 --batch_size 32 \
+    --resume_checkpoint checkpoints/run1/latest_model.pt
 ```
 
 Multi-GPU training is supported via `torchrun`:

@@ -63,8 +63,10 @@ def save_checkpoint(
     epoch: int,
     checkpoint_folder: str,
     args_dict: dict,
+    checkpoint_name: str = "best_model.pt",
+    best_val_loss: float | None = None,
 ):
-    """Save model (unwrapped from DDP), optimizer, and scheduler to best_model.pt."""
+    """Save model (unwrapped from DDP), optimizer, scheduler, and training metadata."""
     base = model.module if hasattr(model, "module") else model
     os.makedirs(checkpoint_folder, exist_ok=True)
     torch.save(
@@ -73,10 +75,11 @@ def save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
             "val_loss": val_loss,
+            "best_val_loss": val_loss if best_val_loss is None else best_val_loss,
             "epoch": epoch,
             "args": args_dict,
         },
-        os.path.join(checkpoint_folder, "best_model.pt"),
+        os.path.join(checkpoint_folder, checkpoint_name),
     )
 
 

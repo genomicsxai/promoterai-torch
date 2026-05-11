@@ -55,6 +55,9 @@ def main():
     p_train.add_argument("--epochs", type=int, default=100)
     p_train.add_argument("--num_workers", type=int, default=4)
     p_train.add_argument("--resume_checkpoint", default=None)
+    p_train.add_argument("--no_progress", action="store_true", default=False)
+    p_train.add_argument("--log_every_batches", type=int, default=0)
+    p_train.add_argument("--wandb_log_every_batches", type=int, default=0)
     add_wandb_args(p_train)
 
     # ── finetune ──────────────────────────────────────────────────────────────

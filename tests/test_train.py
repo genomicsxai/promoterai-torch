@@ -1,8 +1,10 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
 
 from promoterai_torch.architecture import PromoterAI
-from promoterai_torch.train import compute_loss, load_training_checkpoint
+from promoterai_torch.train import _run_epoch, compute_loss, load_training_checkpoint
 from promoterai_torch.utils import save_checkpoint
 
 
@@ -84,3 +86,79 @@ def test_compute_loss_accepts_uncollated_single_sample_weights():
     loss = compute_loss(outputs, y_tuple, w_tuple)
 
     assert loss == 0.25 * F.mse_loss(outputs[0], y_tuple[0])
+
+
+def test_run_epoch_supports_progress_and_batch_logging(capsys):
+    model = _TinyTrackModel()
+    loader = DataLoader(_TinyTrackDataset(), batch_size=1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    loss = _run_epoch(
+        model,
+        loader,
+        optimizer,
+        torch.device("cpu"),
+        desc="train 1/1",
+        show_progress=False,
+        log_every_batches=1,
+    )
+
+    captured = capsys.readouterr()
+    assert "train 1/1 batch 1" in captured.out
+    assert loss > 0.0
+
+
+def test_run_epoch_logs_batch_loss_and_lr_to_wandb():
+    model = _TinyTrackModel()
+    loader = DataLoader(_TinyTrackDataset(), batch_size=1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    run = _FakeWandbRun()
+
+    _run_epoch(
+        model,
+        loader,
+        optimizer,
+        torch.device("cpu"),
+        desc="train 1/1",
+        wandb_run=run,
+        wandb_prefix="train",
+        wandb_step_offset=10,
+        wandb_log_every_batches=1,
+    )
+
+    assert len(run.logged) == 2
+    metrics, step = run.logged[0]
+    assert step == 11
+    assert metrics["train/batch_loss"] > 0.0
+    assert metrics["train/running_loss"] > 0.0
+    assert metrics["optim/lr"] == 1e-3
+    assert metrics["optim/weight_decay"] == 1e-4
+
+
+class _TinyTrackDataset(Dataset):
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, idx):
+        x = torch.ones(4, 4)
+        y = torch.zeros(4, 2)
+        w = torch.tensor([1.0])
+        return x, (y,), w
+
+
+class _TinyTrackModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, x):
+        out = self.scale * torch.ones(x.shape[0], x.shape[1], 2, device=x.device)
+        return (out,)
+
+
+class _FakeWandbRun:
+    def __init__(self):
+        self.logged = []
+
+    def log(self, metrics, step=None):
+        self.logged.append((metrics, step))

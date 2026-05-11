@@ -17,6 +17,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
+from tqdm import tqdm
 
 from promoterai_torch.architecture import PromoterAI
 from promoterai_torch.dataset import SequenceDataset, build_weighted_dataloader
@@ -82,12 +83,42 @@ def compute_loss(outputs, y_tuple, w_tuple):
     return loss
 
 
-def _run_epoch(model, loader, optimizer, device, world_size=1, max_steps=None, train=True):
+def _run_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+    world_size=1,
+    max_steps=None,
+    train=True,
+    desc=None,
+    show_progress=False,
+    log_every_batches=0,
+    wandb_run=None,
+    wandb_prefix=None,
+    wandb_step_offset=0,
+    wandb_log_every_batches=0,
+):
     """Run one train or eval epoch; stops after max_steps batches when set."""
     model.train(train)
     total_loss, n_steps = 0.0, 0
+    total = max_steps
+    if total is None:
+        try:
+            total = len(loader)
+        except TypeError:
+            total = None
+
+    batches = tqdm(
+        loader,
+        desc=desc,
+        total=total,
+        unit="batch",
+        disable=not show_progress,
+        leave=False,
+    )
     with torch.set_grad_enabled(train):
-        for batch in loader:
+        for batch in batches:
             x, y_tuple, w_tuple = batch
             x = x.to(device)
             y_tuple = tuple(y.to(device) for y in y_tuple)
@@ -104,6 +135,34 @@ def _run_epoch(model, loader, optimizer, device, world_size=1, max_steps=None, t
 
             total_loss += loss.item()
             n_steps += 1
+            running_loss = total_loss / n_steps
+            if show_progress:
+                batches.set_postfix(loss=f"{running_loss:.4f}")
+            if log_every_batches and n_steps % log_every_batches == 0:
+                message = (
+                    f"{desc or 'epoch'} batch {n_steps}"
+                    f" loss={loss.item():.4f} avg_loss={running_loss:.4f}"
+                )
+                if show_progress:
+                    batches.write(message)
+                else:
+                    print(message)
+            if wandb_log_every_batches and n_steps % wandb_log_every_batches == 0:
+                prefix = wandb_prefix or ("train" if train else "val")
+                metrics = {
+                    f"{prefix}/batch_loss": loss.item(),
+                    f"{prefix}/running_loss": running_loss,
+                }
+                if train:
+                    metrics["optim/lr"] = optimizer.param_groups[0]["lr"]
+                    metrics["optim/weight_decay"] = optimizer.param_groups[0][
+                        "weight_decay"
+                    ]
+                log_wandb(
+                    wandb_run,
+                    metrics,
+                    step=wandb_step_offset + n_steps,
+                )
             if max_steps and n_steps >= max_steps:
                 break
 
@@ -129,6 +188,9 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resume_checkpoint", default=None)
+    parser.add_argument("--no_progress", action="store_true", default=False)
+    parser.add_argument("--log_every_batches", type=int, default=0)
+    parser.add_argument("--wandb_log_every_batches", type=int, default=0)
     add_wandb_args(parser)
     args = parser.parse_args()
 
@@ -214,6 +276,11 @@ def main():
         apply_optimizer_schedule(
             optimizer, args.learning_rate, args.weight_decay, args.epochs, epoch
         )
+        lr_now = optimizer.param_groups[0]["lr"]
+        wd_now = optimizer.param_groups[0]["weight_decay"]
+        wandb_batch_log_every = args.wandb_log_every_batches
+        if wandb_batch_log_every == 0 and args.log_every_batches > 0:
+            wandb_batch_log_every = args.log_every_batches
         train_loss = _run_epoch(
             model,
             train_loader,
@@ -222,14 +289,26 @@ def main():
             world_size=world_size,
             max_steps=steps_per_epoch,
             train=True,
+            desc=f"train {epoch + 1}/{args.epochs}",
+            show_progress=(rank == 0 and not args.no_progress),
+            log_every_batches=args.log_every_batches if rank == 0 else 0,
+            wandb_run=wandb_run if rank == 0 else None,
+            wandb_prefix="train",
+            wandb_step_offset=epoch * steps_per_epoch,
+            wandb_log_every_batches=wandb_batch_log_every if rank == 0 else 0,
         )
         val_loss = _run_epoch(
-            model, val_loader, optimizer, device, world_size=world_size, train=False
+            model,
+            val_loader,
+            optimizer,
+            device,
+            world_size=world_size,
+            train=False,
+            desc=f"val {epoch + 1}/{args.epochs}",
+            show_progress=(rank == 0 and not args.no_progress),
         )
 
         if rank == 0:
-            lr_now = optimizer.param_groups[0]["lr"]
-            wd_now = optimizer.param_groups[0]["weight_decay"]
             checkpoint_saved = val_loss < best_val_loss
             next_best_val_loss = min(best_val_loss, val_loss)
             print(
@@ -241,6 +320,10 @@ def main():
                 "val_loss": val_loss,
                 "lr": lr_now,
                 "wd": wd_now,
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "optim/lr": lr_now,
+                "optim/weight_decay": wd_now,
                 "best_val_loss": next_best_val_loss,
                 "checkpoint_saved": int(checkpoint_saved),
             }

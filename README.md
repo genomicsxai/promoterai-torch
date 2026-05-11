@@ -255,6 +255,12 @@ promoterai-torch train \
     --wandb_project promoterai-torch
 ```
 
+Training shows rank-0 train/validation progress bars by default. Use
+`--log_every_batches 100` for explicit batch-loss lines, or `--no_progress` in
+non-interactive logs. W&B always receives epoch loss/LR/weight-decay metrics
+when enabled; use `--wandb_log_every_batches 100` to also log batch losses.
+If omitted, `--log_every_batches` is reused as the W&B batch logging cadence.
+
 Training writes `best_model.pt` when validation improves and `latest_model.pt`
 after every epoch. Resume a pre-empted run explicitly:
 

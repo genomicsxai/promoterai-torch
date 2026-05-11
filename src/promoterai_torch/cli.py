@@ -49,12 +49,23 @@ def main():
     p_train.add_argument("--output_length", type=int, required=True)
     p_train.add_argument("--num_blocks", type=int, required=True)
     p_train.add_argument("--model_dim", type=int, required=True)
-    p_train.add_argument("--batch_size", type=int, required=True)
+    p_train.add_argument(
+        "--batch_size",
+        type=int,
+        required=True,
+        help="Global training batch size; divided evenly across DDP ranks",
+    )
     p_train.add_argument("--learning_rate", type=float, default=5e-4)
     p_train.add_argument("--weight_decay", type=float, default=5e-6)
     p_train.add_argument("--epochs", type=int, default=100)
     p_train.add_argument("--num_workers", type=int, default=4)
     p_train.add_argument("--resume_checkpoint", default=None)
+    p_train.add_argument(
+        "--auto_resume",
+        action="store_true",
+        default=False,
+        help="Resume from checkpoint_folder/latest_model.pt when it exists",
+    )
     p_train.add_argument("--no_progress", action="store_true", default=False)
     p_train.add_argument("--log_every_batches", type=int, default=0)
     p_train.add_argument("--wandb_log_every_batches", type=int, default=0)

@@ -92,6 +92,24 @@ python examples/paper_benchmark/benchmark_variant_scores.py \
     --devices cuda:0 cuda:1 cuda:2 cuda:3
 ```
 
+To benchmark the official TensorFlow/Keras SavedModels from
+[Illumina/PromoterAI](https://github.com/Illumina/PromoterAI), install the
+official `promoterai` package in an environment with TensorFlow and use the
+matching TensorFlow script. This standalone script does not require installing
+`promoterai-torch`.
+
+```sh
+python examples/paper_benchmark/benchmark_variant_scores_tf.py \
+    --benchmark_dir data/benchmark \
+    --dataset GTEx_outlier \
+    --hg38_finetune_model_folder models/promoterAI_v1_hg38_finetune \
+    --hg38_mm10_finetune_model_folder models/promoterAI_v1_hg38_mm10_finetune \
+    --fasta_file hg38.fa \
+    --output_dir results/benchmark_tf/GTEx_outlier \
+    --batch_size 1 \
+    --devices 0 1 2 3
+```
+
 ### Run inference on a genomic sequence
 
 One can also generate predictions for all the tracks that PromoterAI was trained on (these are aggregated and diff'ed to generate the variant scores).
@@ -273,6 +291,18 @@ promoterai-torch train \
     --resume_checkpoint checkpoints/run1/latest_model.pt
 ```
 
+Or opt into automatic epoch-level resumption from
+`<checkpoint_folder>/latest_model.pt` when it exists:
+
+```sh
+promoterai-torch train \
+    --checkpoint_folder checkpoints/run1 \
+    --hdf5_human_folder data/hdf5/human \
+    --input_length 20480 --output_length 4096 \
+    --num_blocks 24 --model_dim 1024 --batch_size 32 \
+    --auto_resume
+```
+
 Multi-GPU training is supported via `torchrun`:
 
 ```sh
@@ -283,6 +313,11 @@ torchrun --nproc_per_node=4 -m promoterai_torch.train \
     --input_length 20480 --output_length 4096 \
     --num_blocks 24 --model_dim 1024 --batch_size 32
 ```
+
+For training, `--batch_size` is the global batch size. In multi-GPU runs it must
+divide evenly by the number of ranks; the script uses `batch_size / world_size`
+per GPU. For example, `--batch_size 32` with 8 GPUs uses 4 samples per GPU and
+keeps `steps_per_epoch=int(sum(dataset_sizes) / 10)` independent of GPU count.
 
 ### Fine-tune on variants
 

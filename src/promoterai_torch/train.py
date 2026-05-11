@@ -56,6 +56,32 @@ def build_model(args, output_dims, device, world_size, rank):
     return model
 
 
+def resolve_per_rank_batch_size(global_batch_size: int, world_size: int) -> int:
+    """Return the rank-local batch size for a requested global batch size."""
+    if global_batch_size < 1:
+        raise ValueError("--batch_size must be >= 1")
+    if world_size < 1:
+        raise ValueError("world_size must be >= 1")
+    if global_batch_size % world_size != 0:
+        raise ValueError(
+            "--batch_size is the global batch size and must be divisible by "
+            f"world_size ({world_size}); got {global_batch_size}"
+        )
+    return global_batch_size // world_size
+
+
+def resolve_resume_checkpoint(args) -> str | None:
+    """Resolve explicit or automatic training checkpoint resumption."""
+    if args.resume_checkpoint:
+        return args.resume_checkpoint
+    if not args.auto_resume:
+        return None
+    latest_checkpoint = os.path.join(args.checkpoint_folder, "latest_model.pt")
+    if os.path.exists(latest_checkpoint):
+        return latest_checkpoint
+    return None
+
+
 def load_training_checkpoint(model, optimizer, checkpoint_path: str, device):
     """Restore model/optimizer state and return (start_epoch, best_val_loss, args)."""
     ckpt = torch.load(checkpoint_path, map_location=device)
@@ -182,12 +208,23 @@ def main():
     parser.add_argument("--output_length", type=int, required=True)
     parser.add_argument("--num_blocks", type=int, required=True)
     parser.add_argument("--model_dim", type=int, required=True)
-    parser.add_argument("--batch_size", type=int, required=True)
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        required=True,
+        help="Global training batch size; divided evenly across DDP ranks",
+    )
     parser.add_argument("--learning_rate", type=float, default=5e-4)
     parser.add_argument("--weight_decay", type=float, default=5e-6)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resume_checkpoint", default=None)
+    parser.add_argument(
+        "--auto_resume",
+        action="store_true",
+        default=False,
+        help="Resume from checkpoint_folder/latest_model.pt when it exists",
+    )
     parser.add_argument("--no_progress", action="store_true", default=False)
     parser.add_argument("--log_every_batches", type=int, default=0)
     parser.add_argument("--wandb_log_every_batches", type=int, default=0)
@@ -223,7 +260,8 @@ def main():
 
     dataset_sizes = [len(d) for d in train_datasets]
     steps_per_epoch = int(sum(dataset_sizes) / 10)
-    train_samples_per_rank = steps_per_epoch * args.batch_size
+    per_rank_batch_size = resolve_per_rank_batch_size(args.batch_size, world_size)
+    train_samples_per_rank = steps_per_epoch * per_rank_batch_size
 
     val_sw = tuple(k == 0 for k in range(num_species))
     val_dataset = SequenceDataset(
@@ -232,7 +270,7 @@ def main():
 
     train_loader = build_weighted_dataloader(
         train_datasets,
-        args.batch_size,
+        per_rank_batch_size,
         args.num_workers,
         rank,
         world_size,
@@ -240,7 +278,7 @@ def main():
     )
     val_loader = build_weighted_dataloader(
         [val_dataset],
-        args.batch_size,
+        per_rank_batch_size,
         args.num_workers,
         rank,
         world_size,
@@ -256,13 +294,14 @@ def main():
     logger = CSVLogger(os.path.join(args.checkpoint_folder, "logs.csv"))
     start_epoch = 0
     best_val_loss = float("inf")
-    if args.resume_checkpoint:
+    resume_checkpoint = resolve_resume_checkpoint(args)
+    if resume_checkpoint:
         start_epoch, best_val_loss, _ = load_training_checkpoint(
-            model, optimizer, args.resume_checkpoint, device
+            model, optimizer, resume_checkpoint, device
         )
         if rank == 0:
             print(
-                f"Resumed training from {args.resume_checkpoint} at epoch {start_epoch + 1}; best_val_loss={best_val_loss:.4f}"
+                f"Resumed training from {resume_checkpoint} at epoch {start_epoch + 1}; best_val_loss={best_val_loss:.4f}"
             )
 
     args_dict = vars(args)
@@ -270,6 +309,8 @@ def main():
     args_dict["output_crop"] = args.input_length - args.output_length
     args_dict["dataset_sizes"] = dataset_sizes
     args_dict["start_epoch"] = start_epoch
+    args_dict["global_batch_size"] = args.batch_size
+    args_dict["per_rank_batch_size"] = per_rank_batch_size
     wandb_run = init_wandb(args, args_dict, rank=rank)
 
     for epoch in range(start_epoch, args.epochs):

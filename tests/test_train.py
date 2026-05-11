@@ -4,8 +4,66 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from promoterai_torch.architecture import PromoterAI
-from promoterai_torch.train import _run_epoch, compute_loss, load_training_checkpoint
+from promoterai_torch.train import (
+    _run_epoch,
+    compute_loss,
+    load_training_checkpoint,
+    resolve_resume_checkpoint,
+    resolve_per_rank_batch_size,
+)
 from promoterai_torch.utils import save_checkpoint
+
+
+def test_resolve_per_rank_batch_size_keeps_batch_global():
+    assert resolve_per_rank_batch_size(global_batch_size=32, world_size=8) == 4
+    assert resolve_per_rank_batch_size(global_batch_size=32, world_size=1) == 32
+
+
+def test_resolve_per_rank_batch_size_rejects_non_divisible_global_batch():
+    try:
+        resolve_per_rank_batch_size(global_batch_size=32, world_size=6)
+    except ValueError as exc:
+        assert "global batch size" in str(exc)
+        assert "divisible" in str(exc)
+    else:
+        raise AssertionError("Expected non-divisible global batch size to fail")
+
+
+def test_resolve_resume_checkpoint_prefers_explicit_checkpoint(tmp_path):
+    explicit = tmp_path / "custom.pt"
+    latest = tmp_path / "latest_model.pt"
+    latest.write_text("placeholder")
+    args = _Args(
+        checkpoint_folder=str(tmp_path),
+        resume_checkpoint=str(explicit),
+        auto_resume=True,
+    )
+
+    assert resolve_resume_checkpoint(args) == str(explicit)
+
+
+def test_resolve_resume_checkpoint_uses_latest_when_auto_resume_enabled(tmp_path):
+    latest = tmp_path / "latest_model.pt"
+    latest.write_text("placeholder")
+    args = _Args(
+        checkpoint_folder=str(tmp_path),
+        resume_checkpoint=None,
+        auto_resume=True,
+    )
+
+    assert resolve_resume_checkpoint(args) == str(latest)
+
+
+def test_resolve_resume_checkpoint_ignores_latest_without_auto_resume(tmp_path):
+    latest = tmp_path / "latest_model.pt"
+    latest.write_text("placeholder")
+    args = _Args(
+        checkpoint_folder=str(tmp_path),
+        resume_checkpoint=None,
+        auto_resume=False,
+    )
+
+    assert resolve_resume_checkpoint(args) is None
 
 
 def test_load_training_checkpoint_restores_model_optimizer_and_epoch(tmp_path):
@@ -37,6 +95,12 @@ def test_load_training_checkpoint_restores_model_optimizer_and_epoch(tmp_path):
         checkpoint_name="latest_model.pt",
         best_val_loss=0.25,
     )
+    ckpt = torch.load(str(tmp_path / "latest_model.pt"), map_location="cpu")
+    assert ckpt["epoch"] == 6
+    assert ckpt["optimizer_state_dict"] is not None
+    assert ckpt["optimizer_state_dict"]["state"]
+    assert "scheduler_state_dict" in ckpt
+    assert ckpt["scheduler_state_dict"] is None
 
     fresh_model = PromoterAI(num_blocks=4, model_dim=8, output_dims=[3], output_crop=0)
     fresh_optimizer = torch.optim.AdamW(
@@ -162,3 +226,8 @@ class _FakeWandbRun:
 
     def log(self, metrics, step=None):
         self.logged.append((metrics, step))
+
+
+class _Args:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)

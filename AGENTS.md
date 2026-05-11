@@ -92,7 +92,9 @@ Published hyperparameters: `num_blocks=24`, `model_dim=1024`, `input_length=2048
 - LR schedule (`make_lr_lambda`): linear warmup 0→10% epochs, constant 10→90%, linear decay 90→100%
 - Weight decay scaled by same factor via `WeightDecayScheduler` (LambdaLR does not touch WD)
 - Steps per epoch: `int(sum(dataset_sizes) / 10)`; fine-tuning: 20% of data per epoch
+- Training `--batch_size` is global; DDP uses `batch_size / world_size` per rank and requires divisibility
 - Checkpoint saves **base model** `state_dict` (unwrapped from DDP) on val loss improvement — fine-tuning also saves base model, not the twin wrapper
+- `--auto_resume` resumes training from `<checkpoint_folder>/latest_model.pt` when present; explicit `--resume_checkpoint` takes precedence
 - `SyncBatchNorm.convert_sync_batchnorm` must run **before** `DistributedDataParallel`
 
 ## Numerical Equivalence

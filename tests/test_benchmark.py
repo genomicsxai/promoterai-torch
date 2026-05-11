@@ -1,10 +1,16 @@
 import math
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from promoterai_torch.benchmark import auroc, benchmark_aurocs
 from promoterai_torch.benchmark import benchmark_paths
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_auroc_perfect_reversed_and_ties():
@@ -55,3 +61,23 @@ def test_benchmark_paths_defaults_to_all_tsvs(tmp_path):
     paths = benchmark_paths(tmp_path)
 
     assert [path.name for path in paths] == ["a.tsv", "b.tsv"]
+
+
+def test_tensorflow_benchmark_script_exposes_cli_help():
+    script = ROOT / "examples" / "paper_benchmark" / "benchmark_variant_scores_tf.py"
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--hg38_finetune_model_folder" in result.stdout
+    assert "--devices" in result.stdout
+
+
+def test_tensorflow_benchmark_script_is_standalone_from_promoterai_torch():
+    script = ROOT / "examples" / "paper_benchmark" / "benchmark_variant_scores_tf.py"
+
+    assert "promoterai_torch" not in script.read_text()

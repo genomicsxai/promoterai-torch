@@ -53,45 +53,6 @@ promoterai-torch score \
 
 Scores are written by default to `variants.{model_name}.tsv` as a new `score` column in [−1, 1] (or to a file path provided by `--output`). Thresholds: ±0.1 (weak effect), ±0.2 (moderate), ±0.5 (strong).
 
-### Benchmark variant scores
-
-The public benchmark variant sets from
-[Illumina/PromoterAI](https://github.com/Illumina/PromoterAI/tree/master/data/benchmark)
-can be downloaded and scored with the two fine-tuned torch checkpoints. The
-benchmark script averages the signed `hg38_finetune` and `hg38_mm10_finetune`
-variant scores, then reports under/over, under/null, and over/null AUROCs:
-
-```sh
-python examples/paper_benchmark/download_benchmark_data.py \
-    --output_dir data/benchmark
-
-python examples/paper_benchmark/benchmark_variant_scores.py \
-    --benchmark_dir data/benchmark \
-    --hg38_finetune_checkpoint models/promoterAI_v1_hg38_finetune.pt \
-    --hg38_mm10_finetune_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
-    --fasta_file hg38.fa \
-    --output_dir results/benchmark \
-    --batch_size 2 \
-    --device cuda
-```
-
-Per-dataset scored TSVs are written to `results/benchmark/*.scores.tsv`, and
-the AUROC summary is written to `results/benchmark/benchmark_aurocs.tsv`.
-Run one or more datasets by adding `--dataset GTEx_outlier` (repeatable). To
-split each dataset across multiple GPUs, pass a device list:
-
-```sh
-python examples/paper_benchmark/benchmark_variant_scores.py \
-    --benchmark_dir data/benchmark \
-    --dataset GTEx_outlier \
-    --hg38_finetune_checkpoint models/promoterAI_v1_hg38_finetune.pt \
-    --hg38_mm10_finetune_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
-    --fasta_file hg38.fa \
-    --output_dir results/benchmark/GTEx_outlier \
-    --batch_size 2 \
-    --devices cuda:0 cuda:1 cuda:2 cuda:3
-```
-
 ### Run inference on a genomic sequence
 
 One can also generate predictions for all the tracks that PromoterAI was trained on (these are aggregated and diff'ed to generate the variant scores).
@@ -174,6 +135,72 @@ attributions = deep_lift_shap(wrapper, x, n_shuffles=20, device="cuda", batch_si
 Do note that calculating DeepLIFT/SHAP on this model is quite expensive: with TF32, `n_shuffles=20`, and `batch_size=1`, it takes ~92s/sequence with ~71GB VRAM used on an A100 80GB.
 
 ## Numerical equivalence
+
+### Equivalence on benchmarks from paper
+
+The public benchmark variant sets from
+[Illumina/PromoterAI](https://github.com/Illumina/PromoterAI/tree/master/data/benchmark)
+can be downloaded and scored with the two fine-tuned torch checkpoints. The
+benchmark script averages the signed `hg38_finetune` and `hg38_mm10_finetune`
+variant scores, then reports under/over, under/null, and over/null AUROCs:
+
+```sh
+python examples/paper_benchmark/download_benchmark_data.py \
+    --output_dir data/benchmark
+
+python examples/paper_benchmark/benchmark_variant_scores.py \
+    --benchmark_dir data/benchmark \
+    --hg38_finetune_checkpoint models/promoterAI_v1_hg38_finetune.pt \
+    --hg38_mm10_finetune_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
+    --fasta_file hg38.fa \
+    --output_dir results/benchmark \
+    --batch_size 2 \
+    --device cuda
+```
+
+Per-dataset scored TSVs are written to `results/benchmark/*.scores.tsv`, and
+the AUROC summary is written to `results/benchmark/benchmark_aurocs.tsv`.
+Run one or more datasets by adding `--dataset GTEx_outlier` (repeatable). To
+split each dataset across multiple GPUs, pass a device list:
+
+```sh
+python examples/paper_benchmark/benchmark_variant_scores.py \
+    --benchmark_dir data/benchmark \
+    --dataset GTEx_outlier \
+    --hg38_finetune_checkpoint models/promoterAI_v1_hg38_finetune.pt \
+    --hg38_mm10_finetune_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
+    --fasta_file hg38.fa \
+    --output_dir results/benchmark/GTEx_outlier \
+    --batch_size 2 \
+    --devices cuda:0 cuda:1 cuda:2 cuda:3
+```
+
+To benchmark the official TensorFlow/Keras SavedModels from
+[Illumina/PromoterAI](https://github.com/Illumina/PromoterAI), install the
+official `promoterai` package in an environment with TensorFlow and use the
+matching TensorFlow script. This standalone script does not require installing
+`promoterai-torch`.
+
+```sh
+python examples/paper_benchmark/benchmark_variant_scores_tf.py \
+    --benchmark_dir data/benchmark \
+    --dataset GTEx_outlier \
+    --hg38_finetune_model_folder models/promoterAI_v1_hg38_finetune \
+    --hg38_mm10_finetune_model_folder models/promoterAI_v1_hg38_mm10_finetune \
+    --fasta_file hg38.fa \
+    --output_dir results/benchmark_tf/GTEx_outlier \
+    --batch_size 1 \
+    --devices 0 1 2 3
+```
+
+After running both benchmark paths, open
+`examples/paper_benchmark/plot_torch_vs_tensorflow_scores.ipynb` to make
+per-dataset and combined scatterplots of torch versus TensorFlow ensemble
+scores. This port and the original TF model produce near equivalent scores, and both also match the published AUROCs.
+
+![SFSWAP scatter](examples/img/paper_benchmark_concordance.png)
+
+### Equivalence on (subset of) published all-promoter variants dataset
 
 Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the original TF/Keras implementation on *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3003), and *DNAJC9* (*n* = 9009) promoter variants. Scores are identical across all comparisons, including the ensembled scores against the published PromoterAI variant scores (Pearson r = 1.0000, MAE = 0.0000). See `examples/` for details. Note that this repo follows the official PromoterAI and rounds variant scores to 4 decimal places.
 
@@ -273,6 +300,18 @@ promoterai-torch train \
     --resume_checkpoint checkpoints/run1/latest_model.pt
 ```
 
+Or opt into automatic epoch-level resumption from
+`<checkpoint_folder>/latest_model.pt` when it exists:
+
+```sh
+promoterai-torch train \
+    --checkpoint_folder checkpoints/run1 \
+    --hdf5_human_folder data/hdf5/human \
+    --input_length 20480 --output_length 4096 \
+    --num_blocks 24 --model_dim 1024 --batch_size 32 \
+    --auto_resume
+```
+
 Multi-GPU training is supported via `torchrun`:
 
 ```sh
@@ -283,6 +322,11 @@ torchrun --nproc_per_node=4 -m promoterai_torch.train \
     --input_length 20480 --output_length 4096 \
     --num_blocks 24 --model_dim 1024 --batch_size 32
 ```
+
+For training, `--batch_size` is the global batch size. In multi-GPU runs it must
+divide evenly by the number of ranks; the script uses `batch_size / world_size`
+per GPU. For example, `--batch_size 32` with 8 GPUs uses 4 samples per GPU and
+keeps `steps_per_epoch=int(sum(dataset_sizes) / 10)` independent of GPU count.
 
 ### Fine-tune on variants
 

@@ -59,6 +59,14 @@ def main():
     p_train.add_argument("--weight_decay", type=float, default=5e-6)
     p_train.add_argument("--epochs", type=int, default=100)
     p_train.add_argument("--num_workers", type=int, default=4)
+    p_train.add_argument("--prefetch_factor", type=int, default=2)
+    p_train.add_argument("--profile_batches", type=int, default=0)
+    p_train.add_argument("--profile_warmup_batches", type=int, default=10)
+    p_train.add_argument("--no_sync_batchnorm", action="store_true", default=False)
+    p_train.add_argument("--compile", action="store_true", default=False)
+    p_train.add_argument(
+        "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+    )
     p_train.add_argument("--resume_checkpoint", default=None)
     p_train.add_argument(
         "--auto_resume",

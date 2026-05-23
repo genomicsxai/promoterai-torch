@@ -121,6 +121,46 @@ def test_sequence_dataset_reverse_augmentation_returns_positive_stride_tensors(
     assert all(stride > 0 for stride in y_t[0].stride())
 
 
+def test_sequence_dataset_caches_hdf5_handles(tmp_path):
+    h5_path = tmp_path / "train.h5"
+    with h5py.File(h5_path, "w") as handle:
+        handle.create_dataset("x", data=np.zeros((2, 200, 4), dtype="float32"))
+        handle.create_dataset("y", data=np.zeros((2, 100, 2), dtype="float32"))
+
+    ds = SequenceDataset([str(h5_path)], 100, 50, (True,))
+    ds[0]
+    first_handle = ds._handles[0]
+    ds[1]
+
+    assert ds._handles[0] is first_handle
+    ds.close()
+    assert ds._handles == {}
+
+
+def test_weighted_dataloader_persistent_workers_and_prefetch_options():
+    loader = build_weighted_dataloader(
+        [_IndexDataset(0, 5)],
+        batch_size=1,
+        num_workers=1,
+        prefetch_factor=3,
+    )
+
+    assert loader.persistent_workers is True
+    assert loader.prefetch_factor == 3
+
+
+def test_weighted_dataloader_omits_worker_prefetch_options_without_workers():
+    loader = build_weighted_dataloader(
+        [_IndexDataset(0, 5)],
+        batch_size=1,
+        num_workers=0,
+        prefetch_factor=3,
+    )
+
+    assert loader.num_workers == 0
+    assert loader.prefetch_factor is None
+
+
 def test_variant_dataset_boundary_zeros_matches_tf_generator(tmp_path):
     fasta_path = tmp_path / "mini.fa"
     fasta_path.write_text(">chr1\nACGTACGT\n")

@@ -10,6 +10,8 @@ Multi-GPU:
 
 import argparse
 import os
+import time
+from contextlib import nullcontext
 from glob import glob
 
 import torch
@@ -43,15 +45,18 @@ def setup_distributed():
 
 
 def build_model(args, output_dims, device, world_size, rank):
-    """Build PromoterAI, convert BN to SyncBatchNorm, and wrap in DDP when world_size > 1."""
+    """Build PromoterAI and optionally wrap it for distributed training."""
     model = PromoterAI(
         num_blocks=args.num_blocks,
         model_dim=args.model_dim,
         output_dims=output_dims,
         output_crop=args.input_length - args.output_length,
     ).to(device)
-    if world_size > 1:
+    if world_size > 1 and not args.no_sync_batchnorm:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    if args.compile:
+        model = torch.compile(model)
+    if world_size > 1:
         model = DistributedDataParallel(model, device_ids=[rank])
     return model
 
@@ -109,6 +114,96 @@ def compute_loss(outputs, y_tuple, w_tuple):
     return loss
 
 
+def resolve_amp_dtype(amp_dtype: str):
+    """Map an AMP CLI string to a torch dtype, or None when AMP is disabled."""
+    if amp_dtype == "none":
+        return None
+    if amp_dtype == "bf16":
+        return torch.bfloat16
+    if amp_dtype == "fp16":
+        return torch.float16
+    raise ValueError(f"Unsupported --amp_dtype: {amp_dtype}")
+
+
+def _sync_for_timing(device: torch.device, enabled: bool) -> None:
+    if enabled and device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _autocast_context(device: torch.device, amp_dtype):
+    if amp_dtype is None or device.type != "cuda":
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def _reduce_epoch_metrics(metrics: dict, device: torch.device, world_size: int) -> dict:
+    """Reduce timing/sample metrics across ranks for rank-local epoch stats."""
+    loss_stats = torch.tensor(
+        [metrics["total_loss"], metrics["n_steps"]], dtype=torch.float64, device=device
+    )
+    sum_stats = torch.tensor(
+        [
+            metrics["local_samples"],
+            metrics["profile_samples"],
+            metrics["profile_steps"],
+            metrics["profile_data_time"],
+            metrics["profile_transfer_time"],
+            metrics["profile_forward_time"],
+            metrics["profile_backward_time"],
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
+    max_stats = torch.tensor(
+        [metrics["epoch_time"], metrics["profile_step_time"]],
+        dtype=torch.float64,
+        device=device,
+    )
+    if world_size > 1:
+        dist.all_reduce(loss_stats, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_stats, op=dist.ReduceOp.SUM)
+        dist.all_reduce(max_stats, op=dist.ReduceOp.MAX)
+
+    total_loss, total_steps = loss_stats.tolist()
+    (
+        global_samples,
+        profile_samples,
+        profile_steps,
+        profile_data_time,
+        profile_transfer_time,
+        profile_forward_time,
+        profile_backward_time,
+    ) = sum_stats.tolist()
+    epoch_time, profile_step_time = max_stats.tolist()
+
+    reduced = {
+        "loss": float(total_loss / max(total_steps, 1.0)),
+        "global_samples": float(global_samples),
+        "epoch_time_sec": float(epoch_time),
+        "samples_per_sec": float(global_samples / epoch_time) if epoch_time > 0 else 0.0,
+        "profile_samples": float(profile_samples),
+        "profile_steps": float(profile_steps),
+        "profile_step_time_sec": float(profile_step_time),
+        "profile_samples_per_sec": (
+            float(profile_samples / profile_step_time) if profile_step_time > 0 else 0.0
+        ),
+    }
+    profile_denominator = max(profile_steps, 1.0)
+    reduced.update(
+        {
+            "profile_data_wait_sec": float(profile_data_time / profile_denominator),
+            "profile_transfer_sec": float(profile_transfer_time / profile_denominator),
+            "profile_forward_loss_sec": float(
+                profile_forward_time / profile_denominator
+            ),
+            "profile_backward_step_sec": float(
+                profile_backward_time / profile_denominator
+            ),
+        }
+    )
+    return reduced
+
+
 def _run_epoch(
     model,
     loader,
@@ -124,11 +219,29 @@ def _run_epoch(
     wandb_prefix=None,
     wandb_step_offset=0,
     wandb_log_every_batches=0,
+    amp_dtype=None,
+    grad_scaler=None,
+    profile_batches=0,
+    profile_warmup_batches=10,
+    return_metrics=False,
 ):
-    """Run one train or eval epoch; stops after max_steps batches when set."""
+    """Run one train or eval epoch; optionally profile a bounded batch window."""
     model.train(train)
     total_loss, n_steps = 0.0, 0
+    local_samples = 0
+    profile_steps = 0
+    profile_samples = 0
+    profile_data_time = 0.0
+    profile_transfer_time = 0.0
+    profile_forward_time = 0.0
+    profile_backward_time = 0.0
+    profile_step_time = 0.0
+    profile_enabled = profile_batches > 0
+    profile_limit = profile_warmup_batches + profile_batches if profile_enabled else None
+
     total = max_steps
+    if profile_limit is not None:
+        total = min(total, profile_limit) if total is not None else profile_limit
     if total is None:
         try:
             total = len(loader)
@@ -143,25 +256,79 @@ def _run_epoch(
         disable=not show_progress,
         leave=False,
     )
-    with torch.set_grad_enabled(train):
-        for batch in batches:
-            x, y_tuple, w_tuple = batch
-            x = x.to(device)
-            y_tuple = tuple(y.to(device) for y in y_tuple)
-            w_tuple = w_tuple.to(device)
+    iterator = iter(batches)
+    epoch_start = time.perf_counter()
+    data_start = time.perf_counter()
 
-            outputs = model(x)
-            loss = compute_loss(outputs, y_tuple, w_tuple)
+    with torch.set_grad_enabled(train):
+        while True:
+            if max_steps and n_steps >= max_steps:
+                break
+            if profile_limit is not None and n_steps >= profile_limit:
+                break
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                break
+
+            batch_ready = time.perf_counter()
+            data_wait = batch_ready - data_start
+            in_profile_window = (
+                profile_enabled
+                and n_steps >= profile_warmup_batches
+                and profile_steps < profile_batches
+            )
+            _sync_for_timing(device, in_profile_window)
+            step_start = time.perf_counter()
+
+            x, y_tuple, w_tuple = batch
+            transfer_start = time.perf_counter()
+            x = x.to(device, non_blocking=True)
+            y_tuple = tuple(y.to(device, non_blocking=True) for y in y_tuple)
+            w_tuple = w_tuple.to(device, non_blocking=True)
+            _sync_for_timing(device, in_profile_window)
+            transfer_end = time.perf_counter()
+
+            with _autocast_context(device, amp_dtype):
+                outputs = model(x)
+                loss = compute_loss(outputs, y_tuple, w_tuple)
+            _sync_for_timing(device, in_profile_window)
+            forward_end = time.perf_counter()
 
             if train:
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-4)
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                backward_start = time.perf_counter()
+                if grad_scaler is not None and grad_scaler.is_enabled():
+                    grad_scaler.scale(loss).backward()
+                    grad_scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-4)
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-4)
+                    optimizer.step()
+                _sync_for_timing(device, in_profile_window)
+                backward_end = time.perf_counter()
+            else:
+                backward_start = forward_end
+                backward_end = forward_end
 
+            batch_size = int(x.shape[0])
+            local_samples += batch_size
             total_loss += loss.item()
             n_steps += 1
             running_loss = total_loss / n_steps
+
+            if in_profile_window:
+                profile_steps += 1
+                profile_samples += batch_size
+                profile_data_time += data_wait
+                profile_transfer_time += transfer_end - transfer_start
+                profile_forward_time += forward_end - transfer_end
+                profile_backward_time += backward_end - backward_start
+                profile_step_time += backward_end - step_start
+
             if show_progress:
                 batches.set_postfix(loss=f"{running_loss:.4f}")
             if log_every_batches and n_steps % log_every_batches == 0:
@@ -189,13 +356,29 @@ def _run_epoch(
                     metrics,
                     step=wandb_step_offset + n_steps,
                 )
-            if max_steps and n_steps >= max_steps:
-                break
+            data_start = time.perf_counter()
 
-    stats = torch.tensor([total_loss, n_steps], dtype=torch.float64, device=device)
-    if world_size > 1:
-        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-    return float(stats[0].item() / max(stats[1].item(), 1.0))
+    epoch_time = time.perf_counter() - epoch_start
+    metrics = _reduce_epoch_metrics(
+        {
+            "total_loss": total_loss,
+            "n_steps": n_steps,
+            "local_samples": local_samples,
+            "epoch_time": epoch_time,
+            "profile_samples": profile_samples,
+            "profile_steps": profile_steps,
+            "profile_data_time": profile_data_time,
+            "profile_transfer_time": profile_transfer_time,
+            "profile_forward_time": profile_forward_time,
+            "profile_backward_time": profile_backward_time,
+            "profile_step_time": profile_step_time,
+        },
+        device,
+        world_size,
+    )
+    if return_metrics:
+        return metrics["loss"], metrics
+    return metrics["loss"]
 
 
 def main():
@@ -218,6 +401,14 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=5e-6)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--prefetch_factor", type=int, default=2)
+    parser.add_argument("--profile_batches", type=int, default=0)
+    parser.add_argument("--profile_warmup_batches", type=int, default=10)
+    parser.add_argument("--no_sync_batchnorm", action="store_true", default=False)
+    parser.add_argument("--compile", action="store_true", default=False)
+    parser.add_argument(
+        "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+    )
     parser.add_argument("--resume_checkpoint", default=None)
     parser.add_argument(
         "--auto_resume",
@@ -275,6 +466,7 @@ def main():
         rank,
         world_size,
         num_samples=train_samples_per_rank,
+        prefetch_factor=args.prefetch_factor,
     )
     val_loader = build_weighted_dataloader(
         [val_dataset],
@@ -283,9 +475,14 @@ def main():
         rank,
         world_size,
         shuffle=False,
+        prefetch_factor=args.prefetch_factor,
     )
 
     model = build_model(args, output_dims, device, world_size, rank)
+    amp_torch_dtype = resolve_amp_dtype(args.amp_dtype)
+    grad_scaler = torch.amp.GradScaler(
+        "cuda", enabled=args.amp_dtype == "fp16" and device.type == "cuda"
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
@@ -311,6 +508,19 @@ def main():
     args_dict["start_epoch"] = start_epoch
     args_dict["global_batch_size"] = args.batch_size
     args_dict["per_rank_batch_size"] = per_rank_batch_size
+    args_dict["world_size"] = world_size
+    args_dict["amp_dtype"] = args.amp_dtype
+    if rank == 0:
+        gpu_name = torch.cuda.get_device_name(device) if device.type == "cuda" else str(device)
+        print(
+            "Training setup: "
+            f"world_size={world_size} global_batch_size={args.batch_size} "
+            f"per_rank_batch_size={per_rank_batch_size} num_workers={args.num_workers} "
+            f"prefetch_factor={args.prefetch_factor} amp_dtype={args.amp_dtype} "
+            f"sync_batchnorm={world_size > 1 and not args.no_sync_batchnorm} "
+            f"compile={args.compile} gpu={gpu_name}",
+            flush=True,
+        )
     wandb_run = init_wandb(args, args_dict, rank=rank)
 
     for epoch in range(start_epoch, args.epochs):
@@ -322,7 +532,7 @@ def main():
         wandb_batch_log_every = args.wandb_log_every_batches
         if wandb_batch_log_every == 0 and args.log_every_batches > 0:
             wandb_batch_log_every = args.log_every_batches
-        train_loss = _run_epoch(
+        train_loss, train_metrics = _run_epoch(
             model,
             train_loader,
             optimizer,
@@ -337,7 +547,33 @@ def main():
             wandb_prefix="train",
             wandb_step_offset=epoch * steps_per_epoch,
             wandb_log_every_batches=wandb_batch_log_every if rank == 0 else 0,
+            amp_dtype=amp_torch_dtype,
+            grad_scaler=grad_scaler,
+            profile_batches=args.profile_batches,
+            profile_warmup_batches=args.profile_warmup_batches,
+            return_metrics=True,
         )
+        if rank == 0:
+            print(
+                f"Train throughput: samples/sec={train_metrics['samples_per_sec']:.2f} "
+                f"global_samples={train_metrics['global_samples']:.0f} "
+                f"epoch_time={train_metrics['epoch_time_sec']:.2f}s",
+                flush=True,
+            )
+            if args.profile_batches > 0:
+                print(
+                    f"Profile throughput: samples/sec={train_metrics['profile_samples_per_sec']:.2f} "
+                    f"profile_steps={train_metrics['profile_steps']:.0f} "
+                    f"data_wait={train_metrics['profile_data_wait_sec']:.4f}s "
+                    f"transfer={train_metrics['profile_transfer_sec']:.4f}s "
+                    f"forward_loss={train_metrics['profile_forward_loss_sec']:.4f}s "
+                    f"backward_step={train_metrics['profile_backward_step_sec']:.4f}s",
+                    flush=True,
+                )
+        if args.profile_batches > 0:
+            if rank == 0:
+                print("Profile run complete; skipping validation/checkpoint.", flush=True)
+            break
         val_loss = _run_epoch(
             model,
             val_loader,
@@ -347,6 +583,7 @@ def main():
             train=False,
             desc=f"val {epoch + 1}/{args.epochs}",
             show_progress=(rank == 0 and not args.no_progress),
+            amp_dtype=amp_torch_dtype,
         )
 
         if rank == 0:
@@ -367,6 +604,9 @@ def main():
                 "optim/weight_decay": wd_now,
                 "best_val_loss": next_best_val_loss,
                 "checkpoint_saved": int(checkpoint_saved),
+                "train/samples_per_sec": train_metrics["samples_per_sec"],
+                "train/global_samples": train_metrics["global_samples"],
+                "train/epoch_time_sec": train_metrics["epoch_time_sec"],
             }
             logger.log(row)
             log_wandb(wandb_run, row, step=epoch + 1)

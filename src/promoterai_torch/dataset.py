@@ -99,6 +99,9 @@ class SequenceDataset(Dataset):
         self.output_length = output_length
         self.sample_weight = sample_weight
         self.augment = augment
+        # HDF5 handles are opened lazily per process/DataLoader worker. Opening
+        # per sample is very expensive on shared filesystems.
+        self._handles = {}
         # Build flat index: [(file_idx, row_idx), ...]
         self._index = []
         for fi, path in enumerate(hdf5_files):
@@ -110,14 +113,39 @@ class SequenceDataset(Dataset):
         """Return total number of samples across all HDF5 files."""
         return len(self._index)
 
-    def __getitem__(self, idx: int):
-        """Return (x_tensor, y_tuple, weight_tensor) after cropping and optional augmentation."""
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_handles"] = {}
+        return state
+
+    def _get_handle(self, file_idx: int):
+        """Return a cached read-only HDF5 handle for this worker process."""
         import h5py
 
+        handle = self._handles.get(file_idx)
+        if handle is None:
+            handle = h5py.File(self.hdf5_files[file_idx], "r")
+            self._handles[file_idx] = handle
+        return handle
+
+    def close(self) -> None:
+        """Close any lazily opened HDF5 handles."""
+        for handle in self._handles.values():
+            handle.close()
+        self._handles.clear()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __getitem__(self, idx: int):
+        """Return (x_tensor, y_tuple, weight_tensor) after cropping and optional augmentation."""
         fi, ri = self._index[idx]
-        with h5py.File(self.hdf5_files[fi], "r") as f:
-            x = f["x"][ri]  # (L_stored, 4)
-            y = f["y"][ri]  # (L_stored, n_tracks)
+        handle = self._get_handle(fi)
+        x = handle["x"][ri]  # (L_stored, 4)
+        y = handle["y"][ri]  # (L_stored, n_tracks)
         x_crop, y_tuple, w_tuple = _prepare_sample(
             x,
             y,
@@ -237,6 +265,7 @@ def build_weighted_dataloader(
     world_size: int = 1,
     shuffle: bool = True,
     num_samples: int | None = None,
+    prefetch_factor: int | None = 2,
 ) -> DataLoader:
     """
     Combine multiple SequenceDatasets with weights proportional to dataset size,
@@ -246,13 +275,21 @@ def build_weighted_dataloader(
     total = sum(sizes)
     combined = ConcatDataset(datasets)
 
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "pin_memory": True,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+
     if not shuffle:
         return DataLoader(
             combined,
-            batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True,
+            **loader_kwargs,
         )
 
     # Equal per-sample weights produce dataset-level probabilities size_i / total,
@@ -266,8 +303,6 @@ def build_weighted_dataloader(
     )
     return DataLoader(
         combined,
-        batch_size=batch_size,
         sampler=sampler,
-        num_workers=num_workers,
-        pin_memory=True,
+        **loader_kwargs,
     )

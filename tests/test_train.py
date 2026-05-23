@@ -8,6 +8,7 @@ from promoterai_torch.train import (
     _run_epoch,
     compute_loss,
     load_training_checkpoint,
+    resolve_amp_dtype,
     resolve_resume_checkpoint,
     resolve_per_rank_batch_size,
 )
@@ -27,6 +28,12 @@ def test_resolve_per_rank_batch_size_rejects_non_divisible_global_batch():
         assert "divisible" in str(exc)
     else:
         raise AssertionError("Expected non-divisible global batch size to fail")
+
+
+def test_resolve_amp_dtype_maps_cli_values():
+    assert resolve_amp_dtype("none") is None
+    assert resolve_amp_dtype("bf16") is torch.bfloat16
+    assert resolve_amp_dtype("fp16") is torch.float16
 
 
 def test_resolve_resume_checkpoint_prefers_explicit_checkpoint(tmp_path):
@@ -170,6 +177,28 @@ def test_run_epoch_supports_progress_and_batch_logging(capsys):
     captured = capsys.readouterr()
     assert "train 1/1 batch 1" in captured.out
     assert loss > 0.0
+
+
+def test_run_epoch_returns_profile_metrics():
+    model = _TinyTrackModel()
+    loader = DataLoader(_TinyTrackDataset(), batch_size=1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    loss, metrics = _run_epoch(
+        model,
+        loader,
+        optimizer,
+        torch.device("cpu"),
+        profile_batches=1,
+        profile_warmup_batches=0,
+        return_metrics=True,
+    )
+
+    assert loss > 0.0
+    assert metrics["global_samples"] == 1.0
+    assert metrics["profile_samples"] == 1.0
+    assert metrics["samples_per_sec"] > 0.0
+    assert metrics["profile_samples_per_sec"] > 0.0
 
 
 def test_run_epoch_logs_batch_loss_and_lr_to_wandb():

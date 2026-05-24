@@ -381,6 +381,14 @@ def _run_epoch(
     return metrics["loss"]
 
 
+def _shutdown_dataloader(loader) -> None:
+    """Best-effort shutdown for persistent DataLoader workers before early exit."""
+    iterator = getattr(loader, "_iterator", None)
+    if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+        iterator._shutdown_workers()
+        loader._iterator = None
+
+
 def main():
     """Parse args, build datasets and model, run training loop, save best checkpoint."""
     parser = argparse.ArgumentParser()
@@ -571,6 +579,10 @@ def main():
                     flush=True,
                 )
         if args.profile_batches > 0:
+            _shutdown_dataloader(train_loader)
+            _shutdown_dataloader(val_loader)
+            if world_size > 1:
+                dist.barrier()
             if rank == 0:
                 print("Profile run complete; skipping validation/checkpoint.", flush=True)
             break

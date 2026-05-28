@@ -9,6 +9,9 @@ from promoterai_torch.utils import (
     init_wandb,
     log_wandb,
     make_lr_lambda,
+    normalize_model_state_dict,
+    save_checkpoint,
+    unwrap_model,
 )
 
 
@@ -65,6 +68,47 @@ def test_apply_optimizer_schedule_updates_lr_and_weight_decay_at_epoch_begin():
     assert scale == pytest.approx(0.1)
     assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(5e-7)
+
+
+def test_unwrap_model_handles_torch_compile_wrappers():
+    model = torch.nn.Linear(2, 3)
+    compiled = torch.compile(model)
+
+    assert unwrap_model(compiled) is model
+
+
+def test_save_checkpoint_strips_torch_compile_state_prefix(tmp_path):
+    model = torch.nn.Linear(2, 3)
+    compiled = torch.compile(model)
+    optimizer = torch.optim.AdamW(compiled.parameters(), lr=1e-3)
+
+    save_checkpoint(
+        compiled,
+        optimizer,
+        scheduler=None,
+        val_loss=0.5,
+        epoch=2,
+        checkpoint_folder=str(tmp_path),
+        args_dict={"kind": "linear"},
+        checkpoint_name="latest_model.pt",
+    )
+
+    ckpt = torch.load(str(tmp_path / "latest_model.pt"), map_location="cpu")
+
+    assert set(ckpt["model_state_dict"]) == {"weight", "bias"}
+
+
+def test_normalize_model_state_dict_strips_wrapper_prefixes():
+    state = {
+        "_orig_mod.weight": torch.tensor([1.0]),
+        "module._orig_mod.bias": torch.tensor([2.0]),
+    }
+
+    normalized = normalize_model_state_dict(state)
+
+    assert set(normalized) == {"weight", "bias"}
+    assert torch.equal(normalized["weight"], state["_orig_mod.weight"])
+    assert torch.equal(normalized["bias"], state["module._orig_mod.bias"])
 
 
 def test_init_wandb_noops_without_project_or_on_nonzero_rank():

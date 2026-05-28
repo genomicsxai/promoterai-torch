@@ -30,7 +30,9 @@ from promoterai_torch.utils import (
     finish_wandb,
     init_wandb,
     log_wandb,
+    normalize_model_state_dict,
     save_checkpoint,
+    unwrap_model,
 )
 
 
@@ -90,8 +92,8 @@ def resolve_resume_checkpoint(args) -> str | None:
 def load_training_checkpoint(model, optimizer, checkpoint_path: str, device):
     """Restore model/optimizer state and return (start_epoch, best_val_loss, args)."""
     ckpt = torch.load(checkpoint_path, map_location=device)
-    base = model.module if hasattr(model, "module") else model
-    base.load_state_dict(ckpt["model_state_dict"])
+    base = unwrap_model(model)
+    base.load_state_dict(normalize_model_state_dict(ckpt["model_state_dict"]))
     if ckpt.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     start_epoch = int(ckpt.get("epoch", -1)) + 1

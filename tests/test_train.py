@@ -130,6 +130,36 @@ def test_load_training_checkpoint_restores_model_optimizer_and_epoch(tmp_path):
         assert torch.equal(value, expected_state[key])
 
 
+def test_load_training_checkpoint_accepts_compiled_state_prefix(tmp_path):
+    model = PromoterAI(num_blocks=4, model_dim=8, output_dims=[3], output_crop=0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    prefixed_state = {f"_orig_mod.{k}": v for k, v in model.state_dict().items()}
+    torch.save(
+        {
+            "model_state_dict": prefixed_state,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": 2,
+            "best_val_loss": 0.7,
+            "args": {},
+        },
+        str(tmp_path / "compiled.pt"),
+    )
+
+    fresh_model = PromoterAI(num_blocks=4, model_dim=8, output_dims=[3], output_crop=0)
+    fresh_optimizer = torch.optim.AdamW(fresh_model.parameters(), lr=9e-3)
+    start_epoch, best_val_loss, _ = load_training_checkpoint(
+        fresh_model,
+        fresh_optimizer,
+        str(tmp_path / "compiled.pt"),
+        torch.device("cpu"),
+    )
+
+    assert start_epoch == 3
+    assert best_val_loss == 0.7
+    for key, value in fresh_model.state_dict().items():
+        assert torch.equal(value, model.state_dict()[key])
+
+
 def test_compute_loss_handles_batch_size_one_weights():
     outputs = (
         torch.ones(1, 4, 2),

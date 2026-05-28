@@ -55,6 +55,32 @@ class WeightDecayScheduler:
             pg["weight_decay"] = self.base_wd * scale
 
 
+def unwrap_model(model: nn.Module) -> nn.Module:
+    """Return the underlying model from DDP and torch.compile wrappers."""
+    base = model
+    while hasattr(base, "module"):
+        base = base.module
+    while hasattr(base, "_orig_mod"):
+        base = base._orig_mod
+    return base
+
+
+def normalize_model_state_dict(state_dict: dict) -> dict:
+    """Strip common wrapper prefixes from checkpoint state_dict keys."""
+    normalized = {}
+    for key, value in state_dict.items():
+        clean_key = key
+        changed = True
+        while changed:
+            changed = False
+            for prefix in ("module.", "_orig_mod."):
+                if clean_key.startswith(prefix):
+                    clean_key = clean_key[len(prefix) :]
+                    changed = True
+        normalized[clean_key] = value
+    return normalized
+
+
 def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -67,7 +93,7 @@ def save_checkpoint(
     best_val_loss: float | None = None,
 ):
     """Save model (unwrapped from DDP), optimizer, scheduler, and training metadata."""
-    base = model.module if hasattr(model, "module") else model
+    base = unwrap_model(model)
     os.makedirs(checkpoint_folder, exist_ok=True)
     torch.save(
         {
@@ -98,7 +124,7 @@ def load_pretrained(checkpoint_path: str, map_location: str = "cpu"):
         else args["input_length"] - args["output_length"],
         shortcut_layer_freq=args.get("shortcut_layer_freq", 4),
     )
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(normalize_model_state_dict(ckpt["model_state_dict"]))
     return model, args
 
 

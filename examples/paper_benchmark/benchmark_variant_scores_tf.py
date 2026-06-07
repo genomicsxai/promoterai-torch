@@ -15,6 +15,18 @@ import pandas as pd
 SCORE_COLUMNS = ("hg38_finetune_score", "hg38_mm10_finetune_score")
 
 
+def _score_jobs(
+    hg38_finetune_model_folder: str | Path,
+    hg38_mm10_finetune_model_folder: str | Path | None,
+) -> tuple[tuple[str, str | Path], ...]:
+    jobs: list[tuple[str, str | Path]] = [
+        ("hg38_finetune_score", hg38_finetune_model_folder)
+    ]
+    if hg38_mm10_finetune_model_folder is not None:
+        jobs.append(("hg38_mm10_finetune_score", hg38_mm10_finetune_model_folder))
+    return tuple(jobs)
+
+
 def _fmt(value: object) -> str:
     if isinstance(value, float):
         return "nan" if math.isnan(value) else f"{value:.4f}"
@@ -215,7 +227,7 @@ def score_benchmark_file_tf(
     benchmark_tsv: str | Path,
     *,
     hg38_finetune_model_folder: str | Path,
-    hg38_mm10_finetune_model_folder: str | Path,
+    hg38_mm10_finetune_model_folder: str | Path | None = None,
     fasta_file: str | Path,
     input_length: int,
     batch_size: int = 1,
@@ -223,9 +235,11 @@ def score_benchmark_file_tf(
     verbose: bool = False,
 ) -> pd.DataFrame:
     df = pd.read_csv(benchmark_tsv, sep="\t")
-    for col, model_folder in zip(
-        SCORE_COLUMNS, (hg38_finetune_model_folder, hg38_mm10_finetune_model_folder)
+    score_columns = []
+    for col, model_folder in _score_jobs(
+        hg38_finetune_model_folder, hg38_mm10_finetune_model_folder
     ):
+        score_columns.append(col)
         df[col] = score_variants_tf(
             df,
             model_folder=model_folder,
@@ -235,7 +249,7 @@ def score_benchmark_file_tf(
             device=device,
             verbose=verbose,
         )
-    df["score"] = df[list(SCORE_COLUMNS)].mean(axis=1)
+    df["score"] = df[score_columns].mean(axis=1)
     return df
 
 
@@ -245,7 +259,7 @@ def _score_tf_shard_worker(
     shard: pd.DataFrame,
     device: str,
     hg38_finetune_model_folder: str,
-    hg38_mm10_finetune_model_folder: str,
+    hg38_mm10_finetune_model_folder: str | None,
     fasta_file: str,
     input_length: int,
     batch_size: int,
@@ -253,8 +267,8 @@ def _score_tf_shard_worker(
 ) -> None:
     try:
         result = {"worker_idx": worker_idx, "index": shard.index.to_numpy()}
-        for col, model_folder in zip(
-            SCORE_COLUMNS, (hg38_finetune_model_folder, hg38_mm10_finetune_model_folder)
+        for col, model_folder in _score_jobs(
+            hg38_finetune_model_folder, hg38_mm10_finetune_model_folder
         ):
             result[col] = score_variants_tf(
                 shard.reset_index(drop=True),
@@ -274,7 +288,7 @@ def score_benchmark_file_tf_multi_device(
     benchmark_tsv: str | Path,
     *,
     hg38_finetune_model_folder: str | Path,
-    hg38_mm10_finetune_model_folder: str | Path,
+    hg38_mm10_finetune_model_folder: str | Path | None = None,
     fasta_file: str | Path,
     input_length: int,
     devices: list[str],
@@ -313,7 +327,11 @@ def score_benchmark_file_tf_multi_device(
                 df.iloc[indices].copy(),
                 device,
                 str(hg38_finetune_model_folder),
-                str(hg38_mm10_finetune_model_folder),
+                (
+                    str(hg38_mm10_finetune_model_folder)
+                    if hg38_mm10_finetune_model_folder is not None
+                    else None
+                ),
                 str(fasta_file),
                 input_length,
                 batch_size,
@@ -354,12 +372,18 @@ def score_benchmark_file_tf_multi_device(
     if failed:
         raise RuntimeError(f"One or more TF benchmark workers exited non-zero: {failed}")
 
-    for col in SCORE_COLUMNS:
+    score_columns = [
+        col
+        for col, _ in _score_jobs(
+            hg38_finetune_model_folder, hg38_mm10_finetune_model_folder
+        )
+    ]
+    for col in score_columns:
         df[col] = np.nan
     for result in results:
-        for col in SCORE_COLUMNS:
+        for col in score_columns:
             df.loc[result["index"], col] = result[col]
-    df["score"] = df[list(SCORE_COLUMNS)].mean(axis=1)
+    df["score"] = df[score_columns].mean(axis=1)
     return df
 
 
@@ -367,7 +391,7 @@ def run_tf_benchmarks(
     benchmark_dir: str | Path,
     *,
     hg38_finetune_model_folder: str | Path,
-    hg38_mm10_finetune_model_folder: str | Path,
+    hg38_mm10_finetune_model_folder: str | Path | None = None,
     fasta_file: str | Path,
     output_dir: str | Path,
     input_length: int = 20480,
@@ -418,12 +442,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Benchmark official TensorFlow PromoterAI SavedModels on the public "
-            "benchmark TSVs and report ensemble AUROCs."
+            "benchmark TSVs and report AUROCs."
         )
     )
     parser.add_argument("--benchmark_dir", required=True)
     parser.add_argument("--hg38_finetune_model_folder", required=True)
-    parser.add_argument("--hg38_mm10_finetune_model_folder", required=True)
+    parser.add_argument("--hg38_mm10_finetune_model_folder", default=None)
     parser.add_argument("--fasta_file", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument(

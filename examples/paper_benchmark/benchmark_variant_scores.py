@@ -25,13 +25,13 @@ def _split_devices(values: list[str] | None) -> list[str] | None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Score PromoterAI benchmark TSVs with hg38_finetune and "
-            "hg38_mm10_finetune torch checkpoints, then report ensemble AUROCs."
+            "Score PromoterAI benchmark TSVs with hg38_finetune and optional "
+            "hg38_mm10_finetune torch checkpoints, then report AUROCs."
         )
     )
     parser.add_argument("--benchmark_dir", required=True)
     parser.add_argument("--hg38_finetune_checkpoint", required=True)
-    parser.add_argument("--hg38_mm10_finetune_checkpoint", required=True)
+    parser.add_argument("--hg38_mm10_finetune_checkpoint", default=None)
     parser.add_argument("--fasta_file", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument(

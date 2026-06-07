@@ -140,9 +140,10 @@ Do note that calculating DeepLIFT/SHAP on this model is quite expensive: with TF
 
 The public benchmark variant sets from
 [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI/tree/master/data/benchmark)
-can be downloaded and scored with the two fine-tuned torch checkpoints. The
-benchmark script averages the signed `hg38_finetune` and `hg38_mm10_finetune`
-variant scores, then reports under/over, under/null, and over/null AUROCs:
+can be downloaded and scored with fine-tuned torch checkpoints. The
+benchmark script reports under/over, under/null, and over/null AUROCs from
+`hg38_finetune` scores, or from the average of signed `hg38_finetune` and
+`hg38_mm10_finetune` variant scores when both checkpoints are provided:
 
 ```sh
 python examples/paper_benchmark/download_benchmark_data.py \
@@ -174,6 +175,9 @@ python examples/paper_benchmark/benchmark_variant_scores.py \
     --batch_size 2 \
     --devices cuda:0 cuda:1 cuda:2 cuda:3
 ```
+
+Omit `--hg38_mm10_finetune_checkpoint` to benchmark with only the
+`hg38_finetune` checkpoint.
 
 To benchmark the official TensorFlow/Keras SavedModels from
 [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI), install the

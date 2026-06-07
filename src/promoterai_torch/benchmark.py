@@ -34,6 +34,18 @@ BENCHMARK_FILES = (
 SCORE_COLUMNS = ("hg38_finetune_score", "hg38_mm10_finetune_score")
 
 
+def _score_jobs(
+    hg38_finetune_checkpoint: str | Path,
+    hg38_mm10_finetune_checkpoint: str | Path | None,
+) -> tuple[tuple[str, str | Path], ...]:
+    jobs: list[tuple[str, str | Path]] = [
+        ("hg38_finetune_score", hg38_finetune_checkpoint)
+    ]
+    if hg38_mm10_finetune_checkpoint is not None:
+        jobs.append(("hg38_mm10_finetune_score", hg38_mm10_finetune_checkpoint))
+    return tuple(jobs)
+
+
 def download_benchmark_data(
     output_dir: str | Path,
     *,
@@ -129,7 +141,7 @@ def score_benchmark_file(
     benchmark_tsv: str | Path,
     *,
     hg38_finetune_checkpoint: str | Path,
-    hg38_mm10_finetune_checkpoint: str | Path,
+    hg38_mm10_finetune_checkpoint: str | Path | None = None,
     fasta_file: str | Path,
     input_length: int,
     batch_size: int = 2,
@@ -137,11 +149,13 @@ def score_benchmark_file(
     num_workers: int = 4,
     verbose: bool = False,
 ) -> pd.DataFrame:
-    """Score one benchmark TSV with both fine-tuned checkpoints and add ensemble scores."""
+    """Score one benchmark TSV and add the single-model or ensemble score."""
     df = pd.read_csv(benchmark_tsv, sep="\t")
-    for col, checkpoint in zip(
-        SCORE_COLUMNS, (hg38_finetune_checkpoint, hg38_mm10_finetune_checkpoint)
+    score_columns = []
+    for col, checkpoint in _score_jobs(
+        hg38_finetune_checkpoint, hg38_mm10_finetune_checkpoint
     ):
+        score_columns.append(col)
         df[col] = score_variants(
             df,
             model_checkpoint=checkpoint,
@@ -152,7 +166,7 @@ def score_benchmark_file(
             num_workers=num_workers,
             verbose=verbose,
         )
-    df["score"] = df[list(SCORE_COLUMNS)].mean(axis=1)
+    df["score"] = df[score_columns].mean(axis=1)
     return df
 
 
@@ -162,7 +176,7 @@ def _score_shard_worker(
     shard: pd.DataFrame,
     device: str,
     hg38_finetune_checkpoint: str,
-    hg38_mm10_finetune_checkpoint: str,
+    hg38_mm10_finetune_checkpoint: str | None,
     fasta_file: str,
     input_length: int,
     batch_size: int,
@@ -172,8 +186,8 @@ def _score_shard_worker(
     """Score one dataframe shard in a child process and report arrays through a queue."""
     try:
         result = {"worker_idx": worker_idx, "index": shard.index.to_numpy()}
-        for col, checkpoint in zip(
-            SCORE_COLUMNS, (hg38_finetune_checkpoint, hg38_mm10_finetune_checkpoint)
+        for col, checkpoint in _score_jobs(
+            hg38_finetune_checkpoint, hg38_mm10_finetune_checkpoint
         ):
             result[col] = score_variants(
                 shard.reset_index(drop=True),
@@ -194,7 +208,7 @@ def score_benchmark_file_multi_device(
     benchmark_tsv: str | Path,
     *,
     hg38_finetune_checkpoint: str | Path,
-    hg38_mm10_finetune_checkpoint: str | Path,
+    hg38_mm10_finetune_checkpoint: str | Path | None = None,
     fasta_file: str | Path,
     input_length: int,
     devices: list[str],
@@ -237,7 +251,11 @@ def score_benchmark_file_multi_device(
                 shard,
                 device,
                 str(hg38_finetune_checkpoint),
-                str(hg38_mm10_finetune_checkpoint),
+                (
+                    str(hg38_mm10_finetune_checkpoint)
+                    if hg38_mm10_finetune_checkpoint is not None
+                    else None
+                ),
                 str(fasta_file),
                 input_length,
                 batch_size,
@@ -279,12 +297,18 @@ def score_benchmark_file_multi_device(
     if failed:
         raise RuntimeError(f"One or more benchmark workers exited non-zero: {failed}")
 
-    for col in SCORE_COLUMNS:
+    score_columns = [
+        col
+        for col, _ in _score_jobs(
+            hg38_finetune_checkpoint, hg38_mm10_finetune_checkpoint
+        )
+    ]
+    for col in score_columns:
         df[col] = np.nan
     for result in results:
-        for col in SCORE_COLUMNS:
+        for col in score_columns:
             df.loc[result["index"], col] = result[col]
-    df["score"] = df[list(SCORE_COLUMNS)].mean(axis=1)
+    df["score"] = df[score_columns].mean(axis=1)
     return df
 
 
@@ -366,7 +390,7 @@ def run_benchmarks(
     benchmark_dir: str | Path,
     *,
     hg38_finetune_checkpoint: str | Path,
-    hg38_mm10_finetune_checkpoint: str | Path,
+    hg38_mm10_finetune_checkpoint: str | Path | None = None,
     fasta_file: str | Path,
     output_dir: str | Path,
     input_length: int = 20480,

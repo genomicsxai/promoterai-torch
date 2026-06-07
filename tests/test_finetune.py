@@ -1,6 +1,7 @@
 import subprocess
 import sys
 
+import pandas as pd
 import pytest
 import torch
 import torch.nn as nn
@@ -11,6 +12,7 @@ from promoterai_torch.finetune import (
     DistributedSliceSampler,
     _run_epoch,
     build_finetune_optimizer,
+    filter_finetune_variants,
     load_finetune_checkpoint,
     resolve_finetune_epoch_sizes,
     resolve_finetune_resume_checkpoint,
@@ -29,6 +31,29 @@ def test_finetune_run_epoch_uses_standard_backward_path():
 
     assert loss > 0.0
     assert not torch.equal(model.scale.detach(), initial_scale)
+
+
+def test_filter_finetune_variants_reports_retained_counts():
+    df = pd.DataFrame(
+        [
+            _variant_row("GENE1", in_cds=0, spliceai=0.01, p_under=0.001),
+            _variant_row("GENE1", in_cds=0, spliceai=0.01),
+            _variant_row("GENE2", in_cds=1, spliceai=0.01, p_over=0.001),
+            _variant_row("GENE3", in_cds=0, spliceai=0.10, p_under=0.001),
+            _variant_row("GENE4", in_cds=0, spliceai=0.01),
+        ]
+    )
+
+    retained, stats = filter_finetune_variants(df)
+
+    assert retained["gene"].tolist() == ["GENE1", "GENE1"]
+    assert stats == {
+        "total_variants": 5,
+        "eligible_variants": 3,
+        "outlier_variants": 1,
+        "outlier_genes": 1,
+        "retained_variants": 2,
+    }
 
 
 def test_finetune_fp16_scaler_unscales_before_clipping(monkeypatch):
@@ -412,6 +437,23 @@ class _TinyVariantDataset(Dataset):
         x_ref = torch.ones(4, 4)
         x_alt = torch.full((4, 4), 2.0)
         return (x_ref, x_alt), torch.tensor(0.0)
+
+
+def _variant_row(
+    gene,
+    *,
+    in_cds=0,
+    spliceai=0.01,
+    p_under=1.0,
+    p_over=1.0,
+):
+    return {
+        "gene": gene,
+        "in_cds": in_cds,
+        "spliceai": spliceai,
+        "p_under": p_under,
+        "p_over": p_over,
+    }
 
 
 class _TinyTwinModel(nn.Module):

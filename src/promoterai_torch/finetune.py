@@ -100,6 +100,24 @@ def build_finetune_optimizer(twin_model, learning_rate: float, weight_decay: flo
     )
 
 
+def filter_finetune_variants(df_var: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Apply official outlier filters and return retained variants plus counts."""
+    total_variants = len(df_var)
+    eligible = df_var[(df_var["in_cds"] == 0) & (df_var["spliceai"] < 0.05)]
+    outliers = eligible[
+        (eligible["p_under"] < 0.01) | (eligible["p_over"] < 0.01)
+    ]
+    retained = eligible[eligible["gene"].isin(outliers["gene"])]
+    stats = {
+        "total_variants": total_variants,
+        "eligible_variants": len(eligible),
+        "outlier_variants": len(outliers),
+        "outlier_genes": outliers["gene"].nunique(),
+        "retained_variants": len(retained),
+    }
+    return retained, stats
+
+
 def _run_epoch(
     twin_model,
     loader,
@@ -315,15 +333,25 @@ def main():
             device_ids=[device.index] if device.type == "cuda" else None,
         )
 
-    df_var = pd.read_csv(args.var_file, sep="\t")
-    df_var = df_var[(df_var["in_cds"] == 0) & (df_var["spliceai"] < 0.05)]
-    df_outlier = df_var[(df_var["p_under"] < 0.01) | (df_var["p_over"] < 0.01)]
-    df_var = df_var[df_var["gene"].isin(df_outlier["gene"])]
+    df_var, filter_stats = filter_finetune_variants(
+        pd.read_csv(args.var_file, sep="\t")
+    )
 
     train_chroms = [f"chr{i}" for i in range(1, 21, 2)]
     val_chroms = [f"chr{i}" for i in range(21, 23)]
     df_train = df_var[df_var["chrom"].isin(train_chroms)]
     df_valid = df_var[df_var["chrom"].isin(val_chroms)]
+    if rank == 0:
+        print(
+            "Finetuning variant filter: "
+            f"input={filter_stats['total_variants']} "
+            f"noncoding_spliceai_lt_0.05={filter_stats['eligible_variants']} "
+            f"significant_outliers={filter_stats['outlier_variants']} "
+            f"outlier_genes={filter_stats['outlier_genes']} "
+            f"retained={filter_stats['retained_variants']} "
+            f"train={len(df_train)} val={len(df_valid)}",
+            flush=True,
+        )
 
     fasta = pyfaidx.Fasta(args.fasta_file)
     ds_train = VariantDataset(

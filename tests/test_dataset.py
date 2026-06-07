@@ -172,7 +172,7 @@ def test_variant_dataset_boundary_zeros_matches_tf_generator(tmp_path):
     ds = VariantDataset(df, fasta, input_length=8, output_col="z", boundary="zeros")
     (x_ref, x_alt), y = ds[0]
 
-    assert y == 1.0
+    assert y == 0.0
     assert x_ref.sum() == 0.0
     assert x_alt.sum() == 0.0
 

@@ -16,9 +16,11 @@ import tempfile
 import pandas as pd
 import pyfaidx
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, DistributedSampler, Sampler
 
 from promoterai_torch.architecture import TwinModel
 from promoterai_torch.dataset import VariantDataset
@@ -33,6 +35,9 @@ from promoterai_torch.utils import (
     load_pretrained,
     normalize_model_state_dict,
     resolve_amp_dtype,
+    resolve_per_rank_batch_size,
+    setup_distributed,
+    unwrap_model,
 )
 
 
@@ -44,6 +49,57 @@ def _collate_variant(batch):
     return (x_refs, x_alts), ys
 
 
+class DistributedSliceSampler(Sampler):
+    """Shard a fixed prefix across ranks without padding or duplication."""
+
+    def __init__(self, total_size: int, rank: int, world_size: int):
+        self.total_size = total_size
+        self.rank = rank
+        self.world_size = world_size
+
+    def __iter__(self):
+        return iter(range(self.rank, self.total_size, self.world_size))
+
+    def __len__(self):
+        return self.total_size // self.world_size
+
+
+def resolve_finetune_epoch_sizes(
+    train_size: int, val_size: int, global_batch_size: int
+) -> tuple[int, int]:
+    """Return official steps/epoch and validation prefix size for complete batches."""
+    steps_per_epoch = (train_size // global_batch_size) // 5
+    if steps_per_epoch < 1:
+        raise ValueError(
+            "Finetuning requires at least five complete global batches; "
+            f"got {train_size} variants with --batch_size {global_batch_size}"
+        )
+    complete_val_samples = (val_size // global_batch_size) * global_batch_size
+    if complete_val_samples == 0:
+        raise ValueError(
+            "Validation requires at least one complete global batch; "
+            f"got {val_size} variants with --batch_size {global_batch_size}"
+        )
+    return steps_per_epoch, complete_val_samples
+
+
+def _clip_grad_norm_per_parameter(parameters, max_norm: float) -> None:
+    """Match Keras AdamW(clipnorm=...) by clipping each variable independently."""
+    for parameter in parameters:
+        if parameter.grad is not None:
+            nn.utils.clip_grad_norm_([parameter], max_norm=max_norm)
+
+
+def build_finetune_optimizer(twin_model, learning_rate: float, weight_decay: float):
+    """Build the Keras-compatible AdamW optimizer for the trainable output head."""
+    return torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, twin_model.parameters()),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        eps=1e-7,
+    )
+
+
 def _run_epoch(
     twin_model,
     loader,
@@ -53,10 +109,11 @@ def _run_epoch(
     train=True,
     amp_dtype=None,
     grad_scaler=None,
+    world_size=1,
 ):
     """Run one train or eval epoch; stops after max_steps batches when set."""
     twin_model.train(train)
-    total_loss, n_steps = 0.0, 0
+    total_loss, n_samples, n_steps = 0.0, 0, 0
     with torch.set_grad_enabled(train):
         for (x_ref, x_alt), y in loader:
             x_ref, x_alt, y = x_ref.to(device), x_alt.to(device), y.to(device)
@@ -69,19 +126,31 @@ def _run_epoch(
                 if grad_scaler is not None and grad_scaler.is_enabled():
                     grad_scaler.scale(loss).backward()
                     grad_scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(twin_model.parameters(), max_norm=1.0)
+                    _clip_grad_norm_per_parameter(
+                        twin_model.parameters(), max_norm=1.0
+                    )
                     grad_scaler.step(optimizer)
                     grad_scaler.update()
                 else:
                     loss.backward()
-                    nn.utils.clip_grad_norm_(twin_model.parameters(), max_norm=1.0)
+                    _clip_grad_norm_per_parameter(
+                        twin_model.parameters(), max_norm=1.0
+                    )
                     optimizer.step()
 
-            total_loss += loss.item()
+            batch_size = int(y.shape[0])
+            total_loss += loss.item() * batch_size
+            n_samples += batch_size
             n_steps += 1
             if max_steps and n_steps >= max_steps:
                 break
-    return total_loss / max(n_steps, 1)
+    loss_stats = torch.tensor(
+        [total_loss, n_samples], dtype=torch.float64, device=device
+    )
+    if world_size > 1:
+        dist.all_reduce(loss_stats, op=dist.ReduceOp.SUM)
+    reduced_loss, reduced_samples = loss_stats.tolist()
+    return reduced_loss / max(reduced_samples, 1.0)
 
 
 def save_finetune_checkpoint(
@@ -96,8 +165,10 @@ def save_finetune_checkpoint(
     best_val_loss: float | None = None,
     grad_scaler=None,
     atomic: bool = False,
+    inference_only: bool = False,
 ):
-    """Save a load_pretrained-compatible base-model checkpoint from a TwinModel."""
+    """Save an inference-only model or a full resumable finetuning checkpoint."""
+    twin_model = unwrap_model(twin_model)
     args_dict = dict(base_args)
     args_dict.setdefault(
         "output_crop", args_dict.get("input_length", 0) - args_dict.get("output_length", 0)
@@ -105,22 +176,31 @@ def save_finetune_checkpoint(
     args_dict["finetune_args"] = dict(finetune_args)
     checkpoint = {
         "model_state_dict": twin_model.base_model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": None,
-        "grad_scaler_state_dict": (
-            grad_scaler.state_dict()
-            if grad_scaler is not None and grad_scaler.is_enabled()
-            else None
-        ),
-        "val_loss": val_loss,
-        "best_val_loss": val_loss if best_val_loss is None else best_val_loss,
-        "epoch": epoch,
         "args": args_dict,
-        "torch_rng_state": torch.get_rng_state(),
-        "cuda_rng_state_all": (
-            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-        ),
     }
+    if not inference_only:
+        checkpoint.update(
+            {
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": None,
+                "grad_scaler_state_dict": (
+                    grad_scaler.state_dict()
+                    if grad_scaler is not None and grad_scaler.is_enabled()
+                    else None
+                ),
+                "val_loss": val_loss,
+                "best_val_loss": (
+                    val_loss if best_val_loss is None else best_val_loss
+                ),
+                "epoch": epoch,
+                "torch_rng_state": torch.get_rng_state(),
+                "cuda_rng_state_all": (
+                    torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available()
+                    else None
+                ),
+            }
+        )
     checkpoint_path = os.path.join(checkpoint_folder, checkpoint_name)
     if not atomic:
         torch.save(checkpoint, checkpoint_path)
@@ -163,6 +243,7 @@ def load_finetune_checkpoint(
 ) -> tuple[int, float, dict]:
     """Restore finetuning state and return (start_epoch, best_val_loss, args)."""
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    twin_model = unwrap_model(twin_model)
     twin_model.base_model.load_state_dict(
         normalize_model_state_dict(checkpoint["model_state_dict"])
     )
@@ -195,7 +276,12 @@ def main():
     parser.add_argument("--var_file", required=True)
     parser.add_argument("--fasta_file", required=True)
     parser.add_argument("--input_length", type=int, required=True)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Global batch size; divided evenly across torchrun ranks",
+    )
     parser.add_argument("--learning_rate", type=float, default=5e-4)
     parser.add_argument("--weight_decay", type=float, default=5e-6)
     parser.add_argument("--epochs", type=int, default=100)
@@ -213,12 +299,21 @@ def main():
     add_wandb_args(parser)
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    rank, world_size, device = setup_distributed()
+    per_rank_batch_size = resolve_per_rank_batch_size(args.batch_size, world_size)
     twin_model_folder = args.model_checkpoint.replace(".pt", "") + "_finetune"
-    os.makedirs(twin_model_folder, exist_ok=True)
+    if rank == 0:
+        os.makedirs(twin_model_folder, exist_ok=True)
+    if world_size > 1:
+        dist.barrier()
 
     base_model, base_args = load_pretrained(args.model_checkpoint, map_location=str(device))
     twin_model = TwinModel(base_model).to(device)
+    if world_size > 1:
+        twin_model = DistributedDataParallel(
+            twin_model,
+            device_ids=[device.index] if device.type == "cuda" else None,
+        )
 
     df_var = pd.read_csv(args.var_file, sep="\t")
     df_var = df_var[(df_var["in_cds"] == 0) & (df_var["spliceai"] < 0.05)]
@@ -238,33 +333,55 @@ def main():
         df_valid, fasta, args.input_length, output_col="z", boundary="zeros"
     )
 
+    steps_per_epoch, complete_val_samples = resolve_finetune_epoch_sizes(
+        len(ds_train), len(ds_valid), args.batch_size
+    )
+
+    train_sampler = (
+        DistributedSampler(
+            ds_train,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            drop_last=True,
+        )
+        if world_size > 1
+        else None
+    )
+    val_sampler = (
+        DistributedSliceSampler(complete_val_samples, rank, world_size)
+        if world_size > 1
+        else None
+    )
     loader_train = DataLoader(
         ds_train,
-        batch_size=args.batch_size,
-        shuffle=True,
+        batch_size=per_rank_batch_size,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=args.num_workers,
         collate_fn=_collate_variant,
+        drop_last=True,
     )
     loader_valid = DataLoader(
         ds_valid,
-        batch_size=args.batch_size,
+        batch_size=per_rank_batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=args.num_workers,
         collate_fn=_collate_variant,
+        drop_last=True,
     )
 
     # Only the unfrozen output_heads[0] params have gradients
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, twin_model.parameters()),
-        lr=args.learning_rate,
+    optimizer = build_finetune_optimizer(
+        twin_model,
+        learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
     )
     amp_torch_dtype = resolve_amp_dtype(args.amp_dtype)
     grad_scaler = torch.amp.GradScaler(
         "cuda", enabled=args.amp_dtype == "fp16" and device.type == "cuda"
     )
-    # steps_per_epoch = 20% of training data (matching TF len(gen_train) // 5)
-    steps_per_epoch = max(1, len(ds_train) // (5 * args.batch_size))
     logger = CSVLogger(os.path.join(twin_model_folder, "logs.csv"))
     start_epoch = 0
     best_val_loss = float("inf")
@@ -279,18 +396,33 @@ def main():
             resume_checkpoint,
             device,
         )
-        print(
-            f"Resumed finetuning from {resume_checkpoint} at epoch "
-            f"{start_epoch + 1}; best_val_loss={best_val_loss:.4f}"
-        )
+        if rank == 0:
+            print(
+                f"Resumed finetuning from {resume_checkpoint} at epoch "
+                f"{start_epoch + 1}; best_val_loss={best_val_loss:.4f}"
+            )
     wandb_config = dict(base_args)
     wandb_config["finetune_args"] = vars(args)
     wandb_config["n_train_variants"] = len(ds_train)
     wandb_config["n_val_variants"] = len(ds_valid)
     wandb_config["start_epoch"] = start_epoch
-    wandb_run = init_wandb(args, wandb_config)
+    wandb_config["global_batch_size"] = args.batch_size
+    wandb_config["per_rank_batch_size"] = per_rank_batch_size
+    wandb_config["world_size"] = world_size
+    wandb_run = init_wandb(args, wandb_config, rank=rank)
+
+    if rank == 0:
+        print(
+            "Finetuning setup: "
+            f"world_size={world_size} global_batch_size={args.batch_size} "
+            f"per_rank_batch_size={per_rank_batch_size} "
+            f"steps_per_epoch={steps_per_epoch} amp_dtype={args.amp_dtype}",
+            flush=True,
+        )
 
     for epoch in range(start_epoch, args.epochs):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         apply_optimizer_schedule(
             optimizer, args.learning_rate, args.weight_decay, args.epochs, epoch
         )
@@ -303,6 +435,7 @@ def main():
             train=True,
             amp_dtype=amp_torch_dtype,
             grad_scaler=grad_scaler,
+            world_size=world_size,
         )
         val_loss = _run_epoch(
             twin_model,
@@ -311,28 +444,53 @@ def main():
             device,
             train=False,
             amp_dtype=amp_torch_dtype,
+            world_size=world_size,
         )
 
         lr_now = optimizer.param_groups[0]["lr"]
         wd_now = optimizer.param_groups[0]["weight_decay"]
         checkpoint_saved = val_loss < best_val_loss
-        print(
-            f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  lr={lr_now:.2e}  wd={wd_now:.2e}"
-        )
+        next_best_val_loss = min(best_val_loss, val_loss)
         row = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
             "val_loss": val_loss,
             "lr": lr_now,
             "wd": wd_now,
-            "best_val_loss": min(best_val_loss, val_loss),
+            "best_val_loss": next_best_val_loss,
             "checkpoint_saved": int(checkpoint_saved),
         }
-        logger.log(row)
-        log_wandb(wandb_run, row, step=epoch + 1)
-
         if checkpoint_saved:
-            best_val_loss = val_loss
+            best_val_loss = next_best_val_loss
+
+        if rank == 0:
+            print(
+                f"Epoch {epoch + 1}/{args.epochs}  train_loss={train_loss:.4f}  "
+                f"val_loss={val_loss:.4f}  lr={lr_now:.2e}  wd={wd_now:.2e}"
+            )
+            logger.log(row)
+            log_wandb(wandb_run, row, step=epoch + 1)
+
+            if checkpoint_saved:
+                save_finetune_checkpoint(
+                    twin_model,
+                    optimizer,
+                    val_loss,
+                    epoch,
+                    twin_model_folder,
+                    base_args,
+                    {
+                        **vars(args),
+                        "global_batch_size": args.batch_size,
+                        "per_rank_batch_size": per_rank_batch_size,
+                        "world_size": world_size,
+                    },
+                    best_val_loss=best_val_loss,
+                    grad_scaler=grad_scaler,
+                    inference_only=True,
+                )
+                print(f"  Saved best model (val_loss={val_loss:.4f})")
+
             save_finetune_checkpoint(
                 twin_model,
                 optimizer,
@@ -340,27 +498,23 @@ def main():
                 epoch,
                 twin_model_folder,
                 base_args,
-                vars(args),
+                {
+                    **vars(args),
+                    "global_batch_size": args.batch_size,
+                    "per_rank_batch_size": per_rank_batch_size,
+                    "world_size": world_size,
+                },
+                checkpoint_name="latest_model.pt",
                 best_val_loss=best_val_loss,
                 grad_scaler=grad_scaler,
+                atomic=True,
             )
-            print(f"  Saved best model (val_loss={val_loss:.4f})")
-
-        save_finetune_checkpoint(
-            twin_model,
-            optimizer,
-            val_loss,
-            epoch,
-            twin_model_folder,
-            base_args,
-            vars(args),
-            checkpoint_name="latest_model.pt",
-            best_val_loss=best_val_loss,
-            grad_scaler=grad_scaler,
-            atomic=True,
-        )
+        if world_size > 1:
+            dist.barrier()
 
     finish_wandb(wandb_run)
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

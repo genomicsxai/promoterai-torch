@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import csv
 import os
+import tempfile
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Callable
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 
@@ -25,6 +28,35 @@ def autocast_context(device: torch.device, amp_dtype):
     if amp_dtype is None or device.type != "cuda":
         return nullcontext()
     return torch.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def setup_distributed():
+    """Initialize torchrun DDP when LOCAL_RANK is set."""
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if local_rank == -1:
+        return 0, 1, torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(backend)
+    if backend == "nccl":
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+    return dist.get_rank(), dist.get_world_size(), device
+
+
+def resolve_per_rank_batch_size(global_batch_size: int, world_size: int) -> int:
+    """Return rank-local batch size for a divisible global batch size."""
+    if global_batch_size < 1:
+        raise ValueError("--batch_size must be >= 1")
+    if world_size < 1:
+        raise ValueError("world_size must be >= 1")
+    if global_batch_size % world_size != 0:
+        raise ValueError(
+            "--batch_size is the global batch size and must be divisible by "
+            f"world_size ({world_size}); got {global_batch_size}"
+        )
+    return global_batch_size // world_size
 
 
 def make_lr_lambda(total_epochs: int) -> Callable[[int], float]:
@@ -110,22 +142,66 @@ def save_checkpoint(
     args_dict: dict,
     checkpoint_name: str = "best_model.pt",
     best_val_loss: float | None = None,
+    inference_only: bool = False,
 ):
-    """Save model (unwrapped from DDP), optimizer, scheduler, and training metadata."""
+    """Save an inference-only model or a full resumable training checkpoint."""
     base = unwrap_model(model)
     os.makedirs(checkpoint_folder, exist_ok=True)
-    torch.save(
-        {
-            "model_state_dict": base.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
-            "val_loss": val_loss,
-            "best_val_loss": val_loss if best_val_loss is None else best_val_loss,
-            "epoch": epoch,
-            "args": args_dict,
-        },
-        os.path.join(checkpoint_folder, checkpoint_name),
+    checkpoint = {
+        "model_state_dict": base.state_dict(),
+        "args": args_dict,
+    }
+    if not inference_only:
+        checkpoint.update(
+            {
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+                "val_loss": val_loss,
+                "best_val_loss": (
+                    val_loss if best_val_loss is None else best_val_loss
+                ),
+                "epoch": epoch,
+            }
+        )
+    torch.save(checkpoint, os.path.join(checkpoint_folder, checkpoint_name))
+
+
+def export_inference_checkpoint(
+    checkpoint_path: str | os.PathLike,
+    output_path: str | os.PathLike,
+) -> None:
+    """Strip a full checkpoint down to model weights and reconstruction arguments."""
+    source = Path(checkpoint_path).resolve()
+    output = Path(output_path).resolve()
+    if source == output:
+        raise ValueError("Input and output checkpoint paths must be different")
+
+    checkpoint = torch.load(source, map_location="cpu")
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Checkpoint must be a dictionary")
+    missing = {"model_state_dict", "args"} - checkpoint.keys()
+    if missing:
+        raise ValueError(
+            "Checkpoint is missing required field(s): " + ", ".join(sorted(missing))
+        )
+
+    inference_checkpoint = {
+        "model_state_dict": normalize_model_state_dict(
+            checkpoint["model_state_dict"]
+        ),
+        "args": checkpoint["args"],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        dir=output.parent, prefix=f".{output.name}.", suffix=".tmp"
     )
+    os.close(fd)
+    try:
+        torch.save(inference_checkpoint, temp_path)
+        os.replace(temp_path, output)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def load_pretrained(checkpoint_path: str, map_location: str = "cpu"):

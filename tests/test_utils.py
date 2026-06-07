@@ -5,6 +5,7 @@ import types
 
 from promoterai_torch.utils import (
     apply_optimizer_schedule,
+    export_inference_checkpoint,
     finish_wandb,
     init_wandb,
     log_wandb,
@@ -96,6 +97,93 @@ def test_save_checkpoint_strips_torch_compile_state_prefix(tmp_path):
     ckpt = torch.load(str(tmp_path / "latest_model.pt"), map_location="cpu")
 
     assert set(ckpt["model_state_dict"]) == {"weight", "bias"}
+
+
+def test_save_checkpoint_can_write_inference_only_checkpoint(tmp_path):
+    model = torch.nn.Linear(2, 3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    save_checkpoint(
+        model,
+        optimizer,
+        scheduler=None,
+        val_loss=0.5,
+        epoch=2,
+        checkpoint_folder=str(tmp_path),
+        args_dict={"kind": "linear"},
+        checkpoint_name="best_model.pt",
+        inference_only=True,
+    )
+
+    checkpoint = torch.load(tmp_path / "best_model.pt", map_location="cpu")
+
+    assert set(checkpoint) == {"model_state_dict", "args"}
+
+
+def test_export_inference_checkpoint_strips_training_state(tmp_path):
+    source = tmp_path / "latest_model.pt"
+    output = tmp_path / "exports" / "model.pt"
+    torch.save(
+        {
+            "model_state_dict": {
+                "module._orig_mod.weight": torch.tensor([1.0]),
+            },
+            "optimizer_state_dict": {"state": {"large": torch.ones(100)}},
+            "epoch": 7,
+            "args": {"num_blocks": 4},
+        },
+        source,
+    )
+
+    export_inference_checkpoint(source, output)
+    checkpoint = torch.load(output, map_location="cpu")
+
+    assert set(checkpoint) == {"model_state_dict", "args"}
+    assert set(checkpoint["model_state_dict"]) == {"weight"}
+    assert checkpoint["args"] == {"num_blocks": 4}
+    assert output.stat().st_size < source.stat().st_size
+
+
+def test_export_inference_checkpoint_rejects_in_place_conversion(tmp_path):
+    checkpoint = tmp_path / "model.pt"
+    torch.save({"model_state_dict": {}, "args": {}}, checkpoint)
+
+    with pytest.raises(ValueError, match="must be different"):
+        export_inference_checkpoint(checkpoint, checkpoint)
+
+
+def test_export_inference_cli(tmp_path, monkeypatch):
+    from promoterai_torch.cli import main
+
+    source = tmp_path / "latest_model.pt"
+    output = tmp_path / "model.pt"
+    torch.save(
+        {
+            "model_state_dict": {"weight": torch.tensor([1.0])},
+            "optimizer_state_dict": {"state": {}},
+            "args": {"num_blocks": 4},
+        },
+        source,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "promoterai-torch",
+            "export-inference",
+            "--checkpoint",
+            str(source),
+            "--output",
+            str(output),
+        ],
+    )
+
+    main()
+
+    assert set(torch.load(output, map_location="cpu")) == {
+        "model_state_dict",
+        "args",
+    }
 
 
 def test_normalize_model_state_dict_strips_wrapper_prefixes():

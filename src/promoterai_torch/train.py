@@ -32,19 +32,11 @@ from promoterai_torch.utils import (
     log_wandb,
     normalize_model_state_dict,
     resolve_amp_dtype,
+    resolve_per_rank_batch_size,
     save_checkpoint,
+    setup_distributed,
     unwrap_model,
 )
-
-
-def setup_distributed():
-    """Initialize DDP if LOCAL_RANK is set; returns (rank, world_size, device)."""
-    local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if local_rank == -1:
-        return 0, 1, torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dist.init_process_group("nccl")
-    torch.cuda.set_device(local_rank)
-    return local_rank, dist.get_world_size(), torch.device(f"cuda:{local_rank}")
 
 
 def build_model(args, output_dims, device, world_size, rank):
@@ -60,22 +52,11 @@ def build_model(args, output_dims, device, world_size, rank):
     if args.compile:
         model = torch.compile(model)
     if world_size > 1:
-        model = DistributedDataParallel(model, device_ids=[rank])
-    return model
-
-
-def resolve_per_rank_batch_size(global_batch_size: int, world_size: int) -> int:
-    """Return the rank-local batch size for a requested global batch size."""
-    if global_batch_size < 1:
-        raise ValueError("--batch_size must be >= 1")
-    if world_size < 1:
-        raise ValueError("world_size must be >= 1")
-    if global_batch_size % world_size != 0:
-        raise ValueError(
-            "--batch_size is the global batch size and must be divisible by "
-            f"world_size ({world_size}); got {global_batch_size}"
+        model = DistributedDataParallel(
+            model,
+            device_ids=[device.index] if device.type == "cuda" else None,
         )
-    return global_batch_size // world_size
+    return model
 
 
 def resolve_resume_checkpoint(args) -> str | None:
@@ -621,6 +602,7 @@ def main():
                     args_dict,
                     checkpoint_name="best_model.pt",
                     best_val_loss=best_val_loss,
+                    inference_only=True,
                 )
             save_checkpoint(
                 model,

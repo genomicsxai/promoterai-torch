@@ -5,6 +5,7 @@ Usage:
     promoterai-torch preprocess  [args]
     promoterai-torch train       [args]
     promoterai-torch finetune    [args]
+    promoterai-torch export-inference [args]
     promoterai-torch score       [args]
     promoterai-torch check-hdf5  [args]
 """
@@ -85,7 +86,12 @@ def main():
     p_ft.add_argument("--var_file", required=True)
     p_ft.add_argument("--fasta_file", required=True)
     p_ft.add_argument("--input_length", type=int, required=True)
-    p_ft.add_argument("--batch_size", type=int, default=8)
+    p_ft.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Global batch size; divided evenly across torchrun ranks",
+    )
     p_ft.add_argument("--learning_rate", type=float, default=5e-4)
     p_ft.add_argument("--weight_decay", type=float, default=5e-6)
     p_ft.add_argument("--epochs", type=int, default=100)
@@ -126,6 +132,24 @@ def main():
         type=int,
         default=None,
         help="Output sequence length (metadata only, optional)",
+    )
+
+    # ── export-inference ─────────────────────────────────────────────────────
+    p_export = sub.add_parser(
+        "export-inference",
+        help="Strip training state from a PyTorch checkpoint",
+    )
+    p_export.add_argument(
+        "--checkpoint",
+        required=True,
+        metavar="PATH",
+        help="Input training checkpoint",
+    )
+    p_export.add_argument(
+        "--output",
+        required=True,
+        metavar="PATH",
+        help="Output inference-only .pt checkpoint",
     )
 
     # ── score ─────────────────────────────────────────────────────────────────
@@ -191,6 +215,11 @@ def main():
             input_length=args.input_length,
             output_length=args.output_length,
         )
+
+    elif args.command == "export-inference":
+        from promoterai_torch.utils import export_inference_checkpoint
+
+        export_inference_checkpoint(args.checkpoint, args.output)
 
     elif args.command == "score":
         from promoterai_torch.score import main as _main

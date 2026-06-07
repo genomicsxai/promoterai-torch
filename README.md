@@ -289,7 +289,9 @@ when enabled; use `--wandb_log_every_batches 100` to also log batch losses.
 If omitted, `--log_every_batches` is reused as the W&B batch logging cadence.
 
 Training writes `best_model.pt` when validation improves and `latest_model.pt`
-after every epoch. Resume a pre-empted run explicitly:
+after every epoch. `best_model.pt` contains only model weights and architecture
+arguments for inference, while `latest_model.pt` also contains optimizer and
+other training state needed to resume. Resume a pre-empted run explicitly:
 
 ```sh
 promoterai-torch train \
@@ -352,6 +354,30 @@ completed epoch. Resume automatically after a preemption with `--auto_resume`,
 or select a checkpoint explicitly with `--resume_checkpoint PATH`. An explicit
 checkpoint takes precedence, and `--epochs` remains the total target epoch
 count.
+
+Multi-GPU finetuning is supported through `torchrun`:
+
+```sh
+torchrun --nproc_per_node=4 -m promoterai_torch.finetune \
+    --model_checkpoint best_model.pt \
+    --var_file data/annotation/finetune_gtex.tsv \
+    --fasta_file hg38.fa \
+    --input_length 20480 \
+    --batch_size 8 \
+    --amp_dtype bf16
+```
+
+`--batch_size` is global and must divide evenly across ranks. The frozen
+backbone, including BatchNorm statistics, remains in inference mode; only the
+first output head is updated.
+
+To strip optimizer and other training state from an existing checkpoint:
+
+```sh
+promoterai-torch export-inference \
+    --checkpoint checkpoints/run1/latest_model.pt \
+    --output checkpoints/run1/model_inference.pt
+```
 
 The variant TSV must include `chrom`, `pos`, `ref`, `alt`, `strand`, `z` (expression z-score target), `in_cds`, `spliceai`, `p_under`, `p_over`, `gene` columns (matching the GTEx outlier format).
 

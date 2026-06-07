@@ -217,7 +217,13 @@ class VariantDataset(Dataset):
 
         def _zero():
             x = torch.zeros(self.input_length, 4)
-            y = float(row[self.output_col]) if self.output_col else 0.0
+            y = (
+                0.0
+                if self.boundary == "zeros"
+                else float(row[self.output_col])
+                if self.output_col
+                else 0.0
+            )
             return (x, x), y
 
         if len(seq_ref_str) < self.input_length:

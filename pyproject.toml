@@ -8,7 +8,7 @@ version = "0.1.0"
 authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
 license = { file = "LICENSE" }
 readme = "README.md"
-urls = { homepage = "https://github.com/adamyhe/promoterai-torch" }
+urls = { homepage = "https://github.com/genomicsxai/promoterai-torch" }
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",

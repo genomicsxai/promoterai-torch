@@ -22,10 +22,12 @@ import pyfaidx
 
 from promoterai_torch.dataset import onehot_encode
 
+_pybigwig_import_error = None
 try:
     import pyBigWig
-except ImportError as _pybigwig_import_error:
+except ImportError as exc:
     pyBigWig = None
+    _pybigwig_import_error = exc
 
 
 def _extract_bigwig(bw, chrom, start, end):

@@ -148,3 +148,15 @@ def test_twin_model_same_input_zero_diff():
     x[:, :, 0] = 1.0
     diff = twin(x, x)
     assert torch.allclose(diff, torch.zeros(B), atol=1e-6)
+
+
+def test_twin_model_train_keeps_backbone_batchnorm_frozen():
+    model = PromoterAI(num_blocks=4, model_dim=8, output_dims=[3], output_crop=0)
+    twin = TwinModel(model)
+
+    twin.train()
+
+    assert twin.training is True
+    assert model.training is False
+    assert model.blocks[0].bn1.training is False
+    assert model.output_heads[0].training is True

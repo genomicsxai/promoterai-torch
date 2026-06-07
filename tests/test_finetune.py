@@ -8,8 +8,11 @@ from torch.utils.data import DataLoader, Dataset
 
 from promoterai_torch.architecture import PromoterAI, TwinModel
 from promoterai_torch.finetune import (
+    DistributedSliceSampler,
     _run_epoch,
+    build_finetune_optimizer,
     load_finetune_checkpoint,
+    resolve_finetune_epoch_sizes,
     resolve_finetune_resume_checkpoint,
     save_finetune_checkpoint,
 )
@@ -58,6 +61,41 @@ def test_finetune_fp16_scaler_unscales_before_clipping(monkeypatch):
         "step",
         "update",
     ] * len(loader)
+
+
+def test_finetune_clips_each_parameter_independently(monkeypatch):
+    calls = []
+    model = _TwoParameterTwinModel()
+    loader = DataLoader(_TinyVariantDataset(), batch_size=1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    def record_clip(parameters, max_norm):
+        calls.append((list(parameters), max_norm))
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", record_clip)
+
+    _run_epoch(model, loader, optimizer, torch.device("cpu"), max_steps=1)
+
+    assert len(calls) == 2
+    assert all(len(parameters) == 1 for parameters, _ in calls)
+    assert all(max_norm == 1.0 for _, max_norm in calls)
+
+
+def test_twin_model_keeps_frozen_batchnorm_in_eval_mode():
+    base_model = PromoterAI(
+        num_blocks=4, model_dim=8, output_dims=[3], output_crop=0
+    )
+    twin_model = TwinModel(base_model)
+    before = base_model.blocks[0].bn1.running_mean.detach().clone()
+    loader = DataLoader(_TinyVariantDataset(), batch_size=2)
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, twin_model.parameters()), lr=1e-3
+    )
+
+    _run_epoch(twin_model, loader, optimizer, torch.device("cpu"), max_steps=1)
+
+    assert base_model.blocks[0].bn1.training is False
+    assert torch.equal(base_model.blocks[0].bn1.running_mean, before)
 
 
 def test_autocast_is_disabled_on_cpu(monkeypatch):
@@ -153,6 +191,44 @@ def test_resolve_finetune_resume_checkpoint_starts_fresh_without_latest(tmp_path
     )
 
 
+def test_resolve_finetune_epoch_sizes_matches_official_complete_batches():
+    steps, val_samples = resolve_finetune_epoch_sizes(
+        train_size=103, val_size=23, global_batch_size=8
+    )
+
+    assert steps == (103 // 8) // 5
+    assert val_samples == (23 // 8) * 8
+
+
+@pytest.mark.parametrize(("train_size", "val_size"), [(39, 8), (40, 7)])
+def test_resolve_finetune_epoch_sizes_rejects_insufficient_batches(
+    train_size, val_size
+):
+    with pytest.raises(ValueError):
+        resolve_finetune_epoch_sizes(train_size, val_size, global_batch_size=8)
+
+
+def test_distributed_slice_sampler_has_no_padding_or_duplicates():
+    rank_indices = [
+        list(DistributedSliceSampler(total_size=16, rank=rank, world_size=4))
+        for rank in range(4)
+    ]
+
+    assert all(len(indices) == 4 for indices in rank_indices)
+    assert sorted(index for indices in rank_indices for index in indices) == list(
+        range(16)
+    )
+
+
+def test_finetune_optimizer_matches_keras_epsilon():
+    model = _TinyTwinModel()
+
+    optimizer = build_finetune_optimizer(model, 1e-3, 5e-6)
+
+    assert optimizer.defaults["eps"] == 1e-7
+    assert optimizer.defaults["weight_decay"] == 5e-6
+
+
 def test_finetune_checkpoint_is_load_pretrained_compatible(tmp_path):
     base_model = PromoterAI(
         num_blocks=4,
@@ -183,6 +259,7 @@ def test_finetune_checkpoint_is_load_pretrained_compatible(tmp_path):
         checkpoint_folder=str(tmp_path),
         base_args=base_args,
         finetune_args=finetune_args,
+        inference_only=True,
     )
 
     loaded_model, args = load_pretrained(str(tmp_path / "best_model.pt"))
@@ -193,10 +270,7 @@ def test_finetune_checkpoint_is_load_pretrained_compatible(tmp_path):
     assert args["output_dims"] == [3]
     assert args["output_crop"] == 4
     assert args["finetune_args"] == finetune_args
-    assert checkpoint["val_loss"] == 0.25
-    assert checkpoint["epoch"] == 3
-    assert checkpoint["optimizer_state_dict"] is not None
-    assert checkpoint["scheduler_state_dict"] is None
+    assert set(checkpoint) == {"model_state_dict", "args"}
     for key, value in twin_model.base_model.state_dict().items():
         assert torch.equal(value, loaded_model.state_dict()[key])
 
@@ -243,6 +317,38 @@ def test_finetune_checkpoint_restores_training_state(tmp_path):
     assert fresh_scaler.state_dict() == {"scale": 128.0}
     assert torch.equal(next(fresh_model.base_model.parameters()), first_param)
     assert torch.equal(torch.rand(4), expected_random)
+
+
+def test_finetune_checkpoint_helpers_unwrap_distributed_model(tmp_path):
+    twin_model, optimizer, base_args = _build_twin_model_optimizer()
+    wrapped = _ModuleWrapper(twin_model)
+
+    save_finetune_checkpoint(
+        wrapped,
+        optimizer,
+        val_loss=0.4,
+        epoch=1,
+        checkpoint_folder=str(tmp_path),
+        base_args=base_args,
+        finetune_args={"epochs": 2},
+        checkpoint_name="latest_model.pt",
+        best_val_loss=0.3,
+    )
+    fresh_model, fresh_optimizer, _ = _build_twin_model_optimizer()
+    fresh_wrapped = _ModuleWrapper(fresh_model)
+
+    start_epoch, best_val_loss, _ = load_finetune_checkpoint(
+        fresh_wrapped,
+        fresh_optimizer,
+        grad_scaler=None,
+        checkpoint_path=str(tmp_path / "latest_model.pt"),
+        device=torch.device("cpu"),
+    )
+
+    assert start_epoch == 2
+    assert best_val_loss == 0.3
+    for key, value in twin_model.base_model.state_dict().items():
+        assert torch.equal(value, fresh_model.base_model.state_dict()[key])
 
 
 def test_load_finetune_checkpoint_accepts_legacy_checkpoint(tmp_path):
@@ -315,6 +421,22 @@ class _TinyTwinModel(nn.Module):
 
     def forward(self, x_ref, x_alt):
         return self.scale * (x_alt - x_ref).mean(dim=(1, 2))
+
+
+class _TwoParameterTwinModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.bias = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, x_ref, x_alt):
+        return self.scale * (x_alt - x_ref).mean(dim=(1, 2)) + self.bias
+
+
+class _ModuleWrapper(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
 
 
 class _ScaledLoss:

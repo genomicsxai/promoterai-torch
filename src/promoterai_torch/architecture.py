@@ -163,6 +163,13 @@ class TwinModel(nn.Module):
         for param in base_model.output_heads[0].parameters():
             param.requires_grad = True
 
+    def train(self, mode: bool = True):
+        """Train the output head while keeping the frozen backbone in inference mode."""
+        super().train(mode)
+        self.base_model.eval()
+        self.base_model.output_heads[0].train(mode)
+        return self
+
     def forward(self, x_ref: torch.Tensor, x_alt: torch.Tensor) -> torch.Tensor:
         """Return mean(output_alt - output_ref) averaged over positions and tracks; shape (B,)."""
         out_ref = self.base_model(x_ref)[0]  # (B, L, output_dim)

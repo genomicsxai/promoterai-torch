@@ -1,8 +1,89 @@
+import subprocess
+import sys
+
+import pytest
 import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
 
 from promoterai_torch.architecture import PromoterAI, TwinModel
-from promoterai_torch.finetune import save_finetune_checkpoint
-from promoterai_torch.utils import load_pretrained
+from promoterai_torch.finetune import _run_epoch, save_finetune_checkpoint
+from promoterai_torch.utils import autocast_context, load_pretrained
+
+
+def test_finetune_run_epoch_uses_standard_backward_path():
+    model = _TinyTwinModel()
+    loader = DataLoader(_TinyVariantDataset(), batch_size=1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    initial_scale = model.scale.detach().clone()
+
+    loss = _run_epoch(model, loader, optimizer, torch.device("cpu"))
+
+    assert loss > 0.0
+    assert not torch.equal(model.scale.detach(), initial_scale)
+
+
+def test_finetune_fp16_scaler_unscales_before_clipping(monkeypatch):
+    events = []
+    model = _TinyTwinModel()
+    loader = DataLoader(_TinyVariantDataset(), batch_size=1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scaler = _RecordingGradScaler(events)
+
+    def record_clip(parameters, max_norm):
+        list(parameters)
+        events.append(("clip", max_norm))
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", record_clip)
+
+    _run_epoch(
+        model,
+        loader,
+        optimizer,
+        torch.device("cpu"),
+        amp_dtype=torch.float16,
+        grad_scaler=scaler,
+    )
+
+    assert events == [
+        "scale",
+        "backward",
+        "unscale",
+        ("clip", 1.0),
+        "step",
+        "update",
+    ] * len(loader)
+
+
+def test_autocast_is_disabled_on_cpu(monkeypatch):
+    def unexpected_autocast(*args, **kwargs):
+        raise AssertionError("torch.autocast should not be called for CPU finetuning")
+
+    monkeypatch.setattr(torch, "autocast", unexpected_autocast)
+
+    with autocast_context(torch.device("cpu"), torch.bfloat16):
+        pass
+
+
+@pytest.mark.parametrize("amp_dtype", ["none", "bf16", "fp16"])
+def test_unified_finetune_cli_accepts_amp_choices(amp_dtype):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from promoterai_torch.cli import main; "
+                f"sys.argv=['promoterai-torch', 'finetune', '--amp_dtype', '{amp_dtype}', '--help']; "
+                "main()"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "--amp_dtype {none,bf16,fp16}" in result.stdout
 
 
 def test_finetune_checkpoint_is_load_pretrained_compatible(tmp_path):
@@ -51,3 +132,54 @@ def test_finetune_checkpoint_is_load_pretrained_compatible(tmp_path):
     assert checkpoint["scheduler_state_dict"] is None
     for key, value in twin_model.base_model.state_dict().items():
         assert torch.equal(value, loaded_model.state_dict()[key])
+
+
+class _TinyVariantDataset(Dataset):
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, idx):
+        x_ref = torch.ones(4, 4)
+        x_alt = torch.full((4, 4), 2.0)
+        return (x_ref, x_alt), torch.tensor(0.0)
+
+
+class _TinyTwinModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, x_ref, x_alt):
+        return self.scale * (x_alt - x_ref).mean(dim=(1, 2))
+
+
+class _ScaledLoss:
+    def __init__(self, loss, events):
+        self.loss = loss
+        self.events = events
+
+    def backward(self):
+        self.events.append("backward")
+        self.loss.backward()
+
+
+class _RecordingGradScaler:
+    def __init__(self, events):
+        self.events = events
+
+    def is_enabled(self):
+        return True
+
+    def scale(self, loss):
+        self.events.append("scale")
+        return _ScaledLoss(loss, self.events)
+
+    def unscale_(self, optimizer):
+        self.events.append("unscale")
+
+    def step(self, optimizer):
+        self.events.append("step")
+        optimizer.step()
+
+    def update(self):
+        self.events.append("update")

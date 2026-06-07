@@ -90,6 +90,9 @@ def main():
     p_ft.add_argument("--weight_decay", type=float, default=5e-6)
     p_ft.add_argument("--epochs", type=int, default=100)
     p_ft.add_argument("--num_workers", type=int, default=4)
+    p_ft.add_argument(
+        "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+    )
     add_wandb_args(p_ft)
 
     # ── convert ───────────────────────────────────────────────────────────────

@@ -338,10 +338,14 @@ promoterai-torch finetune \
     --input_length 20480 \
     --batch_size 8 \
     --epochs 100 \
+    --amp_dtype bf16 \
     --wandb_project promoterai-torch --wandb_run_name gtex-finetune
 ```
 
-The fine-tuned base model is saved to `best_model_finetune/best_model.pt`. Only the first output head is trained; all other weights are frozen.
+Mixed precision is opt-in via `--amp_dtype bf16` or `--amp_dtype fp16`;
+the default is full-precision training. The fine-tuned base model is saved to
+`best_model_finetune/best_model.pt`. Only the first output head is trained; all
+other weights are frozen.
 
 The variant TSV must include `chrom`, `pos`, `ref`, `alt`, `strand`, `z` (expression z-score target), `in_cds`, `spliceai`, `p_under`, `p_over`, `gene` columns (matching the GTEx outlier format).
 

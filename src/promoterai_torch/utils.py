@@ -2,10 +2,29 @@ from __future__ import annotations
 
 import csv
 import os
+from contextlib import nullcontext
 from typing import Callable
 
 import torch
 import torch.nn as nn
+
+
+def resolve_amp_dtype(amp_dtype: str):
+    """Map an AMP CLI string to a torch dtype, or None when AMP is disabled."""
+    if amp_dtype == "none":
+        return None
+    if amp_dtype == "bf16":
+        return torch.bfloat16
+    if amp_dtype == "fp16":
+        return torch.float16
+    raise ValueError(f"Unsupported --amp_dtype: {amp_dtype}")
+
+
+def autocast_context(device: torch.device, amp_dtype):
+    """Return CUDA autocast when enabled, otherwise a no-op context."""
+    if amp_dtype is None or device.type != "cuda":
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=amp_dtype)
 
 
 def make_lr_lambda(total_epochs: int) -> Callable[[int], float]:

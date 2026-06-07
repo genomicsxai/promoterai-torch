@@ -25,10 +25,12 @@ from promoterai_torch.utils import (
     CSVLogger,
     add_wandb_args,
     apply_optimizer_schedule,
+    autocast_context,
     finish_wandb,
     init_wandb,
     log_wandb,
     load_pretrained,
+    resolve_amp_dtype,
 )
 
 
@@ -40,21 +42,38 @@ def _collate_variant(batch):
     return (x_refs, x_alts), ys
 
 
-def _run_epoch(twin_model, loader, optimizer, device, max_steps=None, train=True):
+def _run_epoch(
+    twin_model,
+    loader,
+    optimizer,
+    device,
+    max_steps=None,
+    train=True,
+    amp_dtype=None,
+    grad_scaler=None,
+):
     """Run one train or eval epoch; stops after max_steps batches when set."""
     twin_model.train(train)
     total_loss, n_steps = 0.0, 0
     with torch.set_grad_enabled(train):
         for (x_ref, x_alt), y in loader:
             x_ref, x_alt, y = x_ref.to(device), x_alt.to(device), y.to(device)
-            diff = twin_model(x_ref, x_alt)
-            loss = F.mse_loss(diff, y)
+            with autocast_context(device, amp_dtype):
+                diff = twin_model(x_ref, x_alt)
+                loss = F.mse_loss(diff, y)
 
             if train:
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(twin_model.parameters(), max_norm=1.0)
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                if grad_scaler is not None and grad_scaler.is_enabled():
+                    grad_scaler.scale(loss).backward()
+                    grad_scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(twin_model.parameters(), max_norm=1.0)
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(twin_model.parameters(), max_norm=1.0)
+                    optimizer.step()
 
             total_loss += loss.item()
             n_steps += 1
@@ -103,6 +122,9 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=5e-6)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument(
+        "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+    )
     add_wandb_args(parser)
     args = parser.parse_args()
 
@@ -152,6 +174,10 @@ def main():
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
+    amp_torch_dtype = resolve_amp_dtype(args.amp_dtype)
+    grad_scaler = torch.amp.GradScaler(
+        "cuda", enabled=args.amp_dtype == "fp16" and device.type == "cuda"
+    )
     # steps_per_epoch = 20% of training data (matching TF len(gen_train) // 5)
     steps_per_epoch = max(1, len(ds_train) // (5 * args.batch_size))
     logger = CSVLogger(os.path.join(twin_model_folder, "logs.csv"))
@@ -173,8 +199,17 @@ def main():
             device,
             max_steps=steps_per_epoch,
             train=True,
+            amp_dtype=amp_torch_dtype,
+            grad_scaler=grad_scaler,
         )
-        val_loss = _run_epoch(twin_model, loader_valid, optimizer, device, train=False)
+        val_loss = _run_epoch(
+            twin_model,
+            loader_valid,
+            optimizer,
+            device,
+            train=False,
+            amp_dtype=amp_torch_dtype,
+        )
 
         lr_now = optimizer.param_groups[0]["lr"]
         wd_now = optimizer.param_groups[0]["weight_decay"]

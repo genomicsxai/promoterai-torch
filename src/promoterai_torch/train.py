@@ -11,7 +11,6 @@ Multi-GPU:
 import argparse
 import os
 import time
-from contextlib import nullcontext
 from glob import glob
 
 import torch
@@ -27,10 +26,12 @@ from promoterai_torch.utils import (
     CSVLogger,
     add_wandb_args,
     apply_optimizer_schedule,
+    autocast_context,
     finish_wandb,
     init_wandb,
     log_wandb,
     normalize_model_state_dict,
+    resolve_amp_dtype,
     save_checkpoint,
     unwrap_model,
 )
@@ -116,26 +117,9 @@ def compute_loss(outputs, y_tuple, w_tuple):
     return loss
 
 
-def resolve_amp_dtype(amp_dtype: str):
-    """Map an AMP CLI string to a torch dtype, or None when AMP is disabled."""
-    if amp_dtype == "none":
-        return None
-    if amp_dtype == "bf16":
-        return torch.bfloat16
-    if amp_dtype == "fp16":
-        return torch.float16
-    raise ValueError(f"Unsupported --amp_dtype: {amp_dtype}")
-
-
 def _sync_for_timing(device: torch.device, enabled: bool) -> None:
     if enabled and device.type == "cuda":
         torch.cuda.synchronize(device)
-
-
-def _autocast_context(device: torch.device, amp_dtype):
-    if amp_dtype is None or device.type != "cuda":
-        return nullcontext()
-    return torch.autocast(device_type=device.type, dtype=amp_dtype)
 
 
 def _reduce_epoch_metrics(metrics: dict, device: torch.device, world_size: int) -> dict:
@@ -291,7 +275,7 @@ def _run_epoch(
             _sync_for_timing(device, in_profile_window)
             transfer_end = time.perf_counter()
 
-            with _autocast_context(device, amp_dtype):
+            with autocast_context(device, amp_dtype):
                 outputs = model(x)
                 loss = compute_loss(outputs, y_tuple, w_tuple)
             _sync_for_timing(device, in_profile_window)

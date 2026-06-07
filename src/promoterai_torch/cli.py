@@ -93,6 +93,13 @@ def main():
     p_ft.add_argument(
         "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
     )
+    p_ft.add_argument("--resume_checkpoint", default=None)
+    p_ft.add_argument(
+        "--auto_resume",
+        action="store_true",
+        default=False,
+        help="Resume from the finetune output folder's latest_model.pt when present",
+    )
     add_wandb_args(p_ft)
 
     # ── convert ───────────────────────────────────────────────────────────────

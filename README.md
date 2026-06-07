@@ -347,6 +347,12 @@ the default is full-precision training. The fine-tuned base model is saved to
 `best_model_finetune/best_model.pt`. Only the first output head is trained; all
 other weights are frozen.
 
+Finetuning also writes `best_model_finetune/latest_model.pt` after every
+completed epoch. Resume automatically after a preemption with `--auto_resume`,
+or select a checkpoint explicitly with `--resume_checkpoint PATH`. An explicit
+checkpoint takes precedence, and `--epochs` remains the total target epoch
+count.
+
 The variant TSV must include `chrom`, `pos`, `ref`, `alt`, `strand`, `z` (expression z-score target), `in_cds`, `spliceai`, `p_under`, `p_over`, `gene` columns (matching the GTEx outlier format).
 
 ## Development

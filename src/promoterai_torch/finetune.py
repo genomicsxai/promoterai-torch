@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import os
+import tempfile
 
 import pandas as pd
 import pyfaidx
@@ -30,6 +31,7 @@ from promoterai_torch.utils import (
     init_wandb,
     log_wandb,
     load_pretrained,
+    normalize_model_state_dict,
     resolve_amp_dtype,
 )
 
@@ -90,6 +92,10 @@ def save_finetune_checkpoint(
     checkpoint_folder: str,
     base_args: dict,
     finetune_args: dict,
+    checkpoint_name: str = "best_model.pt",
+    best_val_loss: float | None = None,
+    grad_scaler=None,
+    atomic: bool = False,
 ):
     """Save a load_pretrained-compatible base-model checkpoint from a TwinModel."""
     args_dict = dict(base_args)
@@ -97,17 +103,89 @@ def save_finetune_checkpoint(
         "output_crop", args_dict.get("input_length", 0) - args_dict.get("output_length", 0)
     )
     args_dict["finetune_args"] = dict(finetune_args)
-    torch.save(
-        {
-            "model_state_dict": twin_model.base_model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": None,
-            "val_loss": val_loss,
-            "epoch": epoch,
-            "args": args_dict,
-        },
-        os.path.join(checkpoint_folder, "best_model.pt"),
+    checkpoint = {
+        "model_state_dict": twin_model.base_model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": None,
+        "grad_scaler_state_dict": (
+            grad_scaler.state_dict()
+            if grad_scaler is not None and grad_scaler.is_enabled()
+            else None
+        ),
+        "val_loss": val_loss,
+        "best_val_loss": val_loss if best_val_loss is None else best_val_loss,
+        "epoch": epoch,
+        "args": args_dict,
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state_all": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        ),
+    }
+    checkpoint_path = os.path.join(checkpoint_folder, checkpoint_name)
+    if not atomic:
+        torch.save(checkpoint, checkpoint_path)
+        return
+
+    fd, temp_path = tempfile.mkstemp(
+        dir=checkpoint_folder, prefix=f".{checkpoint_name}.", suffix=".tmp"
     )
+    os.close(fd)
+    try:
+        torch.save(checkpoint, temp_path)
+        os.replace(temp_path, checkpoint_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def resolve_finetune_resume_checkpoint(
+    resume_checkpoint: str | None,
+    auto_resume: bool,
+    checkpoint_folder: str,
+) -> str | None:
+    """Resolve explicit or automatic finetuning checkpoint resumption."""
+    if resume_checkpoint:
+        return resume_checkpoint
+    if not auto_resume:
+        return None
+    latest_checkpoint = os.path.join(checkpoint_folder, "latest_model.pt")
+    if os.path.exists(latest_checkpoint):
+        return latest_checkpoint
+    return None
+
+
+def load_finetune_checkpoint(
+    twin_model,
+    optimizer,
+    grad_scaler,
+    checkpoint_path: str,
+    device,
+) -> tuple[int, float, dict]:
+    """Restore finetuning state and return (start_epoch, best_val_loss, args)."""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    twin_model.base_model.load_state_dict(
+        normalize_model_state_dict(checkpoint["model_state_dict"])
+    )
+    if checkpoint.get("optimizer_state_dict") is not None:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    scaler_state = checkpoint.get("grad_scaler_state_dict")
+    if (
+        grad_scaler is not None
+        and grad_scaler.is_enabled()
+        and scaler_state is not None
+    ):
+        grad_scaler.load_state_dict(scaler_state)
+    if checkpoint.get("torch_rng_state") is not None:
+        torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
+    cuda_rng_state = checkpoint.get("cuda_rng_state_all")
+    if cuda_rng_state is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(cuda_rng_state)
+
+    start_epoch = int(checkpoint.get("epoch", -1)) + 1
+    best_val_loss = float(
+        checkpoint.get("best_val_loss", checkpoint.get("val_loss", float("inf")))
+    )
+    return start_epoch, best_val_loss, checkpoint.get("args", {})
 
 
 def main():
@@ -124,6 +202,13 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument(
         "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+    )
+    parser.add_argument("--resume_checkpoint", default=None)
+    parser.add_argument(
+        "--auto_resume",
+        action="store_true",
+        default=False,
+        help="Resume from the finetune output folder's latest_model.pt when present",
     )
     add_wandb_args(parser)
     args = parser.parse_args()
@@ -181,14 +266,31 @@ def main():
     # steps_per_epoch = 20% of training data (matching TF len(gen_train) // 5)
     steps_per_epoch = max(1, len(ds_train) // (5 * args.batch_size))
     logger = CSVLogger(os.path.join(twin_model_folder, "logs.csv"))
+    start_epoch = 0
     best_val_loss = float("inf")
+    resume_checkpoint = resolve_finetune_resume_checkpoint(
+        args.resume_checkpoint, args.auto_resume, twin_model_folder
+    )
+    if resume_checkpoint:
+        start_epoch, best_val_loss, _ = load_finetune_checkpoint(
+            twin_model,
+            optimizer,
+            grad_scaler,
+            resume_checkpoint,
+            device,
+        )
+        print(
+            f"Resumed finetuning from {resume_checkpoint} at epoch "
+            f"{start_epoch + 1}; best_val_loss={best_val_loss:.4f}"
+        )
     wandb_config = dict(base_args)
     wandb_config["finetune_args"] = vars(args)
     wandb_config["n_train_variants"] = len(ds_train)
     wandb_config["n_val_variants"] = len(ds_valid)
+    wandb_config["start_epoch"] = start_epoch
     wandb_run = init_wandb(args, wandb_config)
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         apply_optimizer_schedule(
             optimizer, args.learning_rate, args.weight_decay, args.epochs, epoch
         )
@@ -239,8 +341,24 @@ def main():
                 twin_model_folder,
                 base_args,
                 vars(args),
+                best_val_loss=best_val_loss,
+                grad_scaler=grad_scaler,
             )
             print(f"  Saved best model (val_loss={val_loss:.4f})")
+
+        save_finetune_checkpoint(
+            twin_model,
+            optimizer,
+            val_loss,
+            epoch,
+            twin_model_folder,
+            base_args,
+            vars(args),
+            checkpoint_name="latest_model.pt",
+            best_val_loss=best_val_loss,
+            grad_scaler=grad_scaler,
+            atomic=True,
+        )
 
     finish_wandb(wandb_run)
 

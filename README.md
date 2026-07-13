@@ -15,12 +15,16 @@ If you already have a PromoterAI-torch model and only wish to run inference/inte
 
 ```sh
 pip install promoterai-torch
+# or with uv
+uv add promoterai-torch
 ```
 
 Converting a pretrained Keras/TensorFlow SavedModel (including the official releases from Illumina) requires additional TensorFlow dependencies:
 
 ```sh
 pip install "promoterai-torch[convert]"
+# or with uv
+uv add promoterai-torch --extra convert
 ```
 
 ## Convert a pretrained Keras model
@@ -240,18 +244,22 @@ Errors are ~1e-7 (<1e-4) when run at FP32, i.e., within machine precision, when 
 ## Training models
 
 > [!Warning]
-> This functionality is completely untested; I have not verified whether any of this runs or is correct. I may eventually need to use it, at which point this will receive more careful testing and development.
+> I have verified that this code executes and can train/finetune models. I have also endeavored to make sure that it aligns with the training/finetuning behavior of the official PromoterAI repo. However, I have not attempted to reproduce their models, and cannot ensure there isn't some hidden divergence in some low-level PyTorch vs Tensorflow/Keras behavior.
 
 Fine-tuning or training from scratch using the built-in scripts requires a couple extra dependencies for data preprocessing:
 
 ```sh
 pip install "promoterai-torch[train]"
+# or with uv
+uv add promoterai-torch --extra train
 ```
 
 Weights & Biases logging is optional for training and fine-tuning:
 
 ```sh
-pip install "promoterai-torch[wandb]"
+pip install "promoterai-torch[train,wandb]"
+# or with uv
+uv add promoterai-torch --extra train --extra wandb
 ```
 
 ### Data preprocessing

@@ -2,7 +2,6 @@ import numpy as np
 import pytest  # noqa
 import pandas as pd
 import pyfaidx
-import h5py
 
 from promoterai_torch.dataset import (
     SequenceDataset,
@@ -12,6 +11,10 @@ from promoterai_torch.dataset import (
     onehot_encode,
 )
 import promoterai_torch.dataset as dataset_module
+
+
+def _require_h5py():
+    return pytest.importorskip("h5py")
 
 
 def test_onehot_encode_bases():
@@ -103,6 +106,7 @@ def test_prepare_sample_all_n_zero_weight():
 def test_sequence_dataset_reverse_augmentation_returns_positive_stride_tensors(
     tmp_path, monkeypatch
 ):
+    h5py = _require_h5py()
     h5_path = tmp_path / "train.h5"
     with h5py.File(h5_path, "w") as handle:
         handle.create_dataset("x", data=onehot_encode("ACGT" * 50)[None, :, :])
@@ -122,6 +126,7 @@ def test_sequence_dataset_reverse_augmentation_returns_positive_stride_tensors(
 
 
 def test_sequence_dataset_caches_hdf5_handles(tmp_path):
+    h5py = _require_h5py()
     h5_path = tmp_path / "train.h5"
     with h5py.File(h5_path, "w") as handle:
         handle.create_dataset("x", data=np.zeros((2, 200, 4), dtype="float32"))

@@ -12,6 +12,7 @@ from promoterai_torch.utils import (
     make_lr_lambda,
     normalize_model_state_dict,
     save_checkpoint,
+    setup_distributed,
     unwrap_model,
 )
 
@@ -197,6 +198,29 @@ def test_normalize_model_state_dict_strips_wrapper_prefixes():
     assert set(normalized) == {"weight", "bias"}
     assert torch.equal(normalized["weight"], state["_orig_mod.weight"])
     assert torch.equal(normalized["bias"], state["module._orig_mod.bias"])
+
+
+def test_setup_distributed_returns_global_rank_for_multinode(monkeypatch):
+    calls = {}
+
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    def fake_init_process_group(backend):
+        calls["backend"] = backend
+
+    monkeypatch.setattr(
+        "promoterai_torch.utils.dist.init_process_group", fake_init_process_group
+    )
+    monkeypatch.setattr("promoterai_torch.utils.dist.get_rank", lambda: 5)
+    monkeypatch.setattr("promoterai_torch.utils.dist.get_world_size", lambda: 8)
+
+    rank, world_size, device = setup_distributed()
+
+    assert calls == {"backend": "gloo"}
+    assert rank == 5
+    assert world_size == 8
+    assert device == torch.device("cpu")
 
 
 def test_init_wandb_noops_without_project_or_on_nonzero_rank():

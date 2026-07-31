@@ -1,15 +1,39 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
 [project]
 name = "promoterai-torch"
 version = "0.1.0"
+description = "PyTorch port of PromoterAI for promoter variant scoring."
 authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
-urls = { homepage = "https://github.com/genomicsxai/promoterai-torch" }
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
+keywords = [
+    "bioinformatics",
+    "deep-learning",
+    "genomics",
+    "promoter",
+    "pytorch",
+    "variant-effect-prediction",
+    "metaformer",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 dependencies = [
     "torch>=2.1",
     "numpy>=1.20",
@@ -18,22 +42,49 @@ dependencies = [
     "tqdm>=4.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/genomicsxai/promoterai-torch"
+Repository = "https://github.com/genomicsxai/promoterai-torch"
+Issues = "https://github.com/genomicsxai/promoterai-torch/issues"
+
 [project.optional-dependencies]
 convert = [
     "tensorflow-cpu; sys_platform != 'darwin'",
     "tensorflow; sys_platform == 'darwin'",
     "tf-keras",
 ]
-train = ["h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3"]
+train = ["h5py>=3.0", "scipy>=1.10", "pybigtools>=0.2.5"]
+interpret = ["tangermeme>=0.5"]
 wandb = ["wandb>=0.16"]
-dev = ["pytest>=8", "h5py>=3.0", "scipy>=1.10", "pyBigWig>=0.3", "tangermeme>=0.5"]
+
+[dependency-groups]
+test = [
+    "pytest>=8",
+    "h5py>=3.0",
+    "scipy>=1.10",
+    "pybigtools>=0.2.5",
+    "tangermeme>=0.5",
+]
+publish = ["build>=1.2", "twine>=5.0"]
+dev = [{ include-group = "test" }, { include-group = "publish" }]
 
 [project.scripts]
 promoterai-torch = "promoterai_torch.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-exclude = ["tests*", "PromoterAI*"]
+[tool.hatch.build]
+ignore-vcs = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/promoterai_torch"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/src/promoterai_torch",
+    "/tests",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

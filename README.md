@@ -11,21 +11,40 @@ A PyTorch port of [PromoterAI](https://github.com/Illumina/PromoterAI) v1 from I
 
 ## Install
 
-If you already have a PromoterAI-torch model and only wish to run inference/interpretation on it, you should install just the core dependencies:
+Python 3.10, 3.11, 3.12, and 3.13 are supported.
+
+For variant scoring, embedding extraction, and ordinary PyTorch inference from
+an already-converted checkpoint, install the core package:
 
 ```sh
 pip install promoterai-torch
-# or with uv
 uv add promoterai-torch
 ```
 
-Converting a pretrained Keras/TensorFlow SavedModel (including the official releases from Illumina) requires additional TensorFlow dependencies:
+Optional workflows are split into extras so inference installs do not pull in
+TensorFlow, HDF5/BigWig tooling, or attribution libraries:
 
 ```sh
+# Convert Keras/TensorFlow SavedModels to PyTorch checkpoints.
 pip install "promoterai-torch[convert]"
-# or with uv
 uv add promoterai-torch --extra convert
+
+# Preprocess data, train from scratch, or fine-tune.
+pip install "promoterai-torch[train]"
+uv add promoterai-torch --extra train
+
+# Run DeepLIFT/SHAP interpretation with tangermeme.
+pip install "promoterai-torch[interpret]"
+uv add promoterai-torch --extra interpret
+
+# Training with optional Weights & Biases logging.
+pip install "promoterai-torch[train,wandb]"
+uv add promoterai-torch --extra train --extra wandb
 ```
+
+Quote extras in `pip install` commands so shells such as `zsh` do not expand the
+square brackets. With `uv`, use `uv add` inside a project; for a cloned checkout,
+use `uv sync` as shown in [Development](#development).
 
 ## Convert a pretrained Keras model
 
@@ -102,6 +121,13 @@ with torch.no_grad():
 `model.encode()` returns the final MetaFormer block output — a per-position representation of shape `(B, L, model_dim)` suitable for downstream tasks.
 
 ### DeepLIFT/SHAP attribution
+
+Install the optional interpretation dependencies first:
+
+```sh
+pip install "promoterai-torch[interpret]"
+uv add promoterai-torch --extra interpret
+```
 
 The architecture uses named `nn.ReLU()` module instances (one per non-linearity) so it is compatible with [`tangermeme`](https://github.com/jmschrei/tangermeme)'s `deep_lift_shap`. Wrap the model to transpose the channels-first input expected by tangermeme and reduce the output to `(batch, 1)` (we average over positions and tracks in the demo script):
 
@@ -246,19 +272,13 @@ Errors are ~1e-7 (<1e-4) when run at FP32, i.e., within machine precision, when 
 > [!Warning]
 > I have verified that this code executes and can train/finetune models. I have also endeavored to make sure that it aligns with the training/finetuning behavior of the official PromoterAI repo. However, I have not attempted to reproduce their models, and cannot ensure there isn't some hidden divergence in some low-level PyTorch vs Tensorflow/Keras behavior.
 
-Fine-tuning or training from scratch using the built-in scripts requires a couple extra dependencies for data preprocessing:
-
-```sh
-pip install "promoterai-torch[train]"
-# or with uv
-uv add promoterai-torch --extra train
-```
+Fine-tuning or training from scratch using the built-in scripts requires the
+`train` extra described in [Install](#install).
 
 Weights & Biases logging is optional for training and fine-tuning:
 
 ```sh
 pip install "promoterai-torch[train,wandb]"
-# or with uv
 uv add promoterai-torch --extra train --extra wandb
 ```
 
@@ -395,11 +415,32 @@ The variant TSV must include `chrom`, `pos`, `ref`, `alt`, `strand`, `z` (expres
 
 ## Development
 
-Clone and install locally with `pip`/`uv`.
+Clone the repository and install local development dependencies with `uv`
+dependency groups:
 
 ```sh
-uv sync --extra dev
+uv sync --group dev
 uv run pytest tests/ -v
+```
+
+Use the narrower groups when you only need one workflow:
+
+```sh
+uv sync --group test
+uv run pytest tests/ -v
+
+uv sync --group publish
+uv run python -m build
+uv run python -m twine check dist/*
+```
+
+For a `pip`-only editable install, install the package and development tools
+directly:
+
+```sh
+python -m pip install -e .
+python -m pip install pytest h5py scipy pybigtools tangermeme build twine
+python -m pytest tests/ -v
 ```
 
 ## Reference

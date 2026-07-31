@@ -14,7 +14,7 @@ class FakeBigWig:
         self.values_array = np.asarray(values, dtype="float32")
         self.closed = False
 
-    def values(self, chrom, start, end, numpy=True):
+    def values(self, chrom, start, end, missing=0.0, oob=0.0):
         return self.values_array[: end - start]
 
     def close(self):
@@ -43,7 +43,7 @@ def test_preprocess_uses_stranded_bigwigs_xforms_and_reverses_minus(tmp_path, mo
         opened[path] = FakeBigWig(values)
         return opened[path]
 
-    monkeypatch.setattr(preprocess, "pyBigWig", types.SimpleNamespace(open=fake_open))
+    monkeypatch.setattr(preprocess, "pybigtools", types.SimpleNamespace(open=fake_open))
 
     out_dir = tmp_path / "h5"
     preprocess.preprocess_chrom(
@@ -70,7 +70,7 @@ def test_preprocess_uses_stranded_bigwigs_xforms_and_reverses_minus(tmp_path, mo
     assert opened["rev.bw"].closed
 
 
-def test_preprocess_reports_missing_pybigwig(tmp_path, monkeypatch):
+def test_preprocess_reports_missing_pybigtools(tmp_path, monkeypatch):
     fasta_path = tmp_path / "mini.fa"
     fasta_path.write_text(">chr1\nACGT\n")
     tss_path = tmp_path / "tss.tsv"
@@ -82,9 +82,9 @@ def test_preprocess_reports_missing_pybigwig(tmp_path, monkeypatch):
         bw_path, sep="\t", index=False
     )
 
-    import_error = ModuleNotFoundError("No module named 'pyBigWig'")
-    monkeypatch.setattr(preprocess, "pyBigWig", None)
-    monkeypatch.setattr(preprocess, "_pybigwig_import_error", import_error)
+    import_error = ModuleNotFoundError("No module named 'pybigtools'")
+    monkeypatch.setattr(preprocess, "pybigtools", None)
+    monkeypatch.setattr(preprocess, "_pybigtools_import_error", import_error)
 
     with np.testing.assert_raises_regex(
         ImportError, r'pip install "promoterai-torch\[train\]"'

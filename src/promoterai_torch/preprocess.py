@@ -22,18 +22,18 @@ import pyfaidx
 
 from promoterai_torch.dataset import onehot_encode
 
-_pybigwig_import_error = None
+_pybigtools_import_error = None
 try:
-    import pyBigWig
+    import pybigtools
 except ImportError as exc:
-    pyBigWig = None
-    _pybigwig_import_error = exc
+    pybigtools = None
+    _pybigtools_import_error = exc
 
 
 def _extract_bigwig(bw, chrom, start, end):
     """Fetch values from a BigWig handle; returns zeros on any error or missing region."""
     try:
-        vals = bw.values(chrom, max(0, start), end, numpy=True)
+        vals = bw.values(chrom, max(0, start), end, missing=0.0, oob=0.0)
         if vals is None:
             return np.zeros(end - start, dtype="float32")
         vals = np.array(vals, dtype="float32")
@@ -86,13 +86,13 @@ def preprocess_chrom(
         )
 
     fasta = pyfaidx.Fasta(fasta_file)
-    if pyBigWig is None:
+    if pybigtools is None:
         raise ImportError(
-            "pyBigWig is required for preprocessing. "
+            "pybigtools is required for preprocessing. "
             'Install with: pip install "promoterai-torch[train]"'
-        ) from _pybigwig_import_error
-    bws_fwd = [pyBigWig.open(p) for p in df_bw["fwd"]]
-    bws_rev = [pyBigWig.open(p) for p in df_bw["rev"]]
+        ) from _pybigtools_import_error
+    bws_fwd = [pybigtools.open(p) for p in df_bw["fwd"]]
+    bws_rev = [pybigtools.open(p) for p in df_bw["rev"]]
     bw_xforms = [_compile_xform(expr) for expr in df_bw["xform"]]
 
     half_in = input_length // 2

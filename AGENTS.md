@@ -56,7 +56,7 @@ Core install (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfa
 
 `[convert]` extra adds: `tensorflow-cpu` (Linux/Windows) or `tensorflow` (macOS), `tf-keras`. Required for `promoterai-torch convert`; downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints).
 
-`[train]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `pyBigWig` (preprocessing). Required for `preprocess`, `train`, and `SequenceDataset`.
+`[train]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `pybigtools` (preprocessing). Required for `preprocess`, `train`, and `SequenceDataset`.
 
 ## Model Architecture
 

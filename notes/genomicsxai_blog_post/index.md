@@ -17,13 +17,13 @@ featured_image: /blogs/2026-XXX/paper_benchmark_concordance.png
 
 ## Summary
 
-PromoterAI (Jaganathan, Ersaro, Novakovsky et al., *Science* 2025) predicts how promoter variants alter gene expression, but the official release ships as a TensorFlow/Keras SavedModel. [`promoterai-torch`](https://github.com/genomicsxai/promoterai-torch) is an independent, numerically-equivalent PyTorch port that converts Illumina's checkpoints and makes variant scoring, track prediction, embedding extraction, and DeepLIFT/SHAP attribution available through the PyTorch/`tangermeme` ecosystem — with training and fine-tuning scripts included for anyone who wants to reproduce or extend the model from scratch.
+PromoterAI (Jaganathan, Ersaro, Novakovsky et al., *Science* 2025) predicts how promoter variants alter gene expression, but the official release ships as a TensorFlow/Keras SavedModel. [`promoterai-torch`](https://github.com/genomicsxai/promoterai-torch) is an independent, numerically-equivalent PyTorch port that converts Illumina's checkpoints and makes variant scoring, track prediction, embedding extraction, and DeepLIFT/SHAP attribution available through the PyTorch/`tangermeme` ecosystem, with training and fine-tuning scripts included for anyone who wants to reproduce or extend the model from scratch.
 
 ## Overview
 
-Promoter variants can silently break gene expression without touching a coding exon, and prioritizing which of them matter is a hard, unsolved problem in variant interpretation. PromoterAI addressed this by training a sequence-to-function model on hundreds of regulatory tracks (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq) across human and mouse promoters, then using signed differences between reference and alternate predictions as a variant effect score.
+Promoter variants can silently break gene expression without touching a coding exon, and prioritizing which of them matter is a hard, unsolved problem in variant interpretation. PromoterAI addressed this by training a sequence-to-function model on hundreds of regulatory tracks (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq) across human and mouse promoters, then fine-tuning on expression outlier variants (with signed differences between reference and alternate predictions as a variant effect score).
 
-The catch for anyone working primarily in the PyTorch ecosystem: the official model is TensorFlow/Keras, and interpretability tooling (attribution, embeddings, downstream fine-tuning, sequence design) is often easiest to build on top of PyTorch. `promoterai-torch` re-implements the architecture — a MetaFormer-style stack with species-specific output heads — layer-for-layer in PyTorch, and ships a converter that reads an existing Illumina SavedModel and produces a `.pt` checkpoint with architecture hyperparameters inferred automatically.
+The catch for anyone working primarily in the PyTorch ecosystem: the official model is TensorFlow/Keras, and interpretability tooling (attribution, embeddings, downstream fine-tuning, sequence design) is often easiest to build on top of PyTorch. `promoterai-torch` re-implements the architecture (a MetaFormer-style stack with species-specific output heads) layer-for-layer in PyTorch, and ships a converter that reads an existing Illumina SavedModel and produces a `.pt` checkpoint with architecture hyperparameters inferred automatically.
 
 > This is **not** an official Illumina product. The PyTorch code here is original, but the *weights* still come from Illumina's SavedModels, which remain under their original license — this repo does not redistribute converted checkpoints.
 
@@ -65,7 +65,7 @@ Porting a model is only useful if it actually reproduces the original, so most o
 
 **Track-level equivalence.** Running both the original TF/Keras SavedModel and the converted PyTorch checkpoint on the same sequences and comparing every output track gives errors of ~1e-7 at FP32 — within machine precision — across all four released checkpoints (`hg38`, `hg38_mm10`, `hg38_finetune`, `hg38_mm10_finetune`).
 
-**Variant-score equivalence.** On promoter variants at *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3,003), and *DNAJC9* (*n* = 9,009), torch and TF/Keras variant scores are identical, including the ensembled score used in the paper (Pearson *r* = 1.0000, MAE = 0.0000). Note that both the official repo and this port round to 4 digits, which is why variant scores will generally be actually identical.
+**Variant-score equivalence.** On promoter variants at *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3,003), and *DNAJC9* (*n* = 9,009), torch and TF/Keras variant scores are identical, including the ensembled score used in the paper (Pearson *r* = 1.0000, MAE = 0.0000). Note that the scoring script/CLI in both the official repo and this port round the score to 4 digits, which is why variant scores will generally be actually identical.
 
 ![TERT scatter](TERT_scatter.png)
 

@@ -12,6 +12,8 @@ HDF5_SUFFIXES = {".h5", ".hdf5", ".hdf"}
 
 @dataclass(frozen=True)
 class HDF5CheckResult:
+    """Outcome of checking one HDF5 file: whether it's readable, sample count, and any error."""
+
     path: Path
     ok: bool
     samples: int = 0
@@ -89,6 +91,7 @@ def print_summary(results: list[HDF5CheckResult]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse args, check the given HDF5 paths, print a summary, and return a process exit code."""
     parser = argparse.ArgumentParser(
         description="Check PromoterAI HDF5 training chunks for corruption."
     )
@@ -111,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _validate_shapes(x_shape: tuple[int, ...], y_shape: tuple[int, ...]) -> None:
+    """Raise ValueError if x/y dataset shapes don't match the expected (n, len, channels) layout."""
     if len(x_shape) != 3:
         raise ValueError(f"x must have shape (n, input_len, 4); got {x_shape}")
     if len(y_shape) != 3:

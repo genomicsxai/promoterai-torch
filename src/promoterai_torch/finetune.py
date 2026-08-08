@@ -53,14 +53,17 @@ class DistributedSliceSampler(Sampler):
     """Shard a fixed prefix across ranks without padding or duplication."""
 
     def __init__(self, total_size: int, rank: int, world_size: int):
+        """Store the prefix size and this rank's position within world_size."""
         self.total_size = total_size
         self.rank = rank
         self.world_size = world_size
 
     def __iter__(self):
+        """Yield this rank's strided indices into [0, total_size)."""
         return iter(range(self.rank, self.total_size, self.world_size))
 
     def __len__(self):
+        """Return the number of indices this rank will yield."""
         return self.total_size // self.world_size
 
 
@@ -290,24 +293,72 @@ def load_finetune_checkpoint(
 def main():
     """Filter GTEx outlier variants, fine-tune TwinModel, save best base model checkpoint."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_checkpoint", required=True)
-    parser.add_argument("--var_file", required=True)
-    parser.add_argument("--fasta_file", required=True)
-    parser.add_argument("--input_length", type=int, required=True)
+    parser.add_argument(
+        "--model_checkpoint",
+        required=True,
+        help="Base PyTorch checkpoint (.pt) to fine-tune",
+    )
+    parser.add_argument(
+        "--var_file",
+        required=True,
+        help="TSV of GTEx-outlier-format variants to fine-tune on",
+    )
+    parser.add_argument(
+        "--fasta_file", required=True, help="Reference genome FASTA (indexed with pyfaidx)"
+    )
+    parser.add_argument(
+        "--input_length",
+        type=int,
+        required=True,
+        help="Input sequence length in bp (must match the base checkpoint)",
+    )
     parser.add_argument(
         "--batch_size",
         type=int,
         default=8,
         help="Global batch size; divided evenly across torchrun ranks",
     )
-    parser.add_argument("--learning_rate", type=float, default=5e-4)
-    parser.add_argument("--weight_decay", type=float, default=5e-6)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument(
-        "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+        "--learning_rate",
+        type=float,
+        default=5e-4,
+        help="Peak learning rate (default: %(default)s)",
     )
-    parser.add_argument("--resume_checkpoint", default=None)
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=5e-6,
+        help="Peak weight decay (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=100,
+        help="Total target epoch count (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--amp_dtype",
+        choices=("none", "bf16", "fp16"),
+        default="none",
+        help="Mixed-precision dtype for autocast; 'none' trains in full precision",
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="torch.compile the twin model (adds startup warmup, speeds up steady-state throughput)",
+    )
+    parser.add_argument(
+        "--resume_checkpoint",
+        default=None,
+        help="Explicit checkpoint path to resume from (overrides --auto_resume)",
+    )
     parser.add_argument(
         "--auto_resume",
         action="store_true",
@@ -327,6 +378,8 @@ def main():
 
     base_model, base_args = load_pretrained(args.model_checkpoint, map_location=str(device))
     twin_model = TwinModel(base_model).to(device)
+    if args.compile:
+        twin_model = torch.compile(twin_model)
     if world_size > 1:
         twin_model = DistributedDataParallel(
             twin_model,
@@ -444,7 +497,8 @@ def main():
             "Finetuning setup: "
             f"world_size={world_size} global_batch_size={args.batch_size} "
             f"per_rank_batch_size={per_rank_batch_size} "
-            f"steps_per_epoch={steps_per_epoch} amp_dtype={args.amp_dtype}",
+            f"steps_per_epoch={steps_per_epoch} amp_dtype={args.amp_dtype} "
+            f"compile={args.compile}",
             flush=True,
         )
 

@@ -8,6 +8,8 @@ def _dilation_rate(i):
 
 
 class MetaFormerBlock(nn.Module):
+    """Pre-norm token-mixing + channel-mixing residual block, PromoterAI's basic depth unit."""
+
     def __init__(self, model_dim: int, kernel_size: int, dilation_rate: int):
         """Pre-norm MetaFormer block: depthwise-conv token mixer + FFN channel mixer."""
         super().__init__()
@@ -56,6 +58,8 @@ class MetaFormerBlock(nn.Module):
 
 
 class OutputHead(nn.Module):
+    """Per-species prediction head reading out from a fixed set of backbone shortcut layers."""
+
     def __init__(
         self,
         model_dim: int,
@@ -91,6 +95,8 @@ class OutputHead(nn.Module):
 
 
 class PromoterAI(nn.Module):
+    """Dilated depthwise-conv MetaFormer backbone with one multi-scale output head per species."""
+
     def __init__(
         self,
         num_blocks: int,

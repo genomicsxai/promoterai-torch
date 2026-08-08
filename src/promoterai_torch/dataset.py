@@ -83,6 +83,8 @@ def _prepare_sample(
 
 
 class SequenceDataset(Dataset):
+    """Regulatory-track training dataset backed by preprocessed HDF5 sequence/track chunks."""
+
     def __init__(
         self,
         hdf5_files: list,
@@ -114,6 +116,7 @@ class SequenceDataset(Dataset):
         return len(self._index)
 
     def __getstate__(self):
+        """Drop open HDF5 handles before pickling so each DataLoader worker reopens its own."""
         state = self.__dict__.copy()
         state["_handles"] = {}
         return state
@@ -135,6 +138,7 @@ class SequenceDataset(Dataset):
         self._handles.clear()
 
     def __del__(self):
+        """Best-effort handle cleanup on garbage collection; ignores errors during interpreter teardown."""
         try:
             self.close()
         except Exception:
@@ -161,6 +165,8 @@ class SequenceDataset(Dataset):
 
 
 class VariantDataset(Dataset):
+    """Dataset of ref/alt one-hot sequence pairs extracted from a FASTA around each variant."""
+
     def __init__(
         self,
         df_var: pd.DataFrame,
@@ -216,6 +222,7 @@ class VariantDataset(Dataset):
         center = half
 
         def _zero():
+            """Return an all-zero (ref, alt) pair for a variant that can't be extracted cleanly."""
             x = torch.zeros(self.input_length, 4)
             y = (
                 0.0

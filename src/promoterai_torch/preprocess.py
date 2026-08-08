@@ -154,14 +154,35 @@ def preprocess_chrom(
 def main():
     """Parse args and run preprocess_chrom for the specified chromosome."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hdf5_folder", required=True)
-    parser.add_argument("--tss_file", required=True)
-    parser.add_argument("--fasta_file", required=True)
-    parser.add_argument("--bigwig_files", required=True)
-    parser.add_argument("--chrom", required=True)
-    parser.add_argument("--input_length", type=int, required=True)
-    parser.add_argument("--output_length", type=int, required=True)
-    parser.add_argument("--chunk_size", type=int, default=256)
+    parser.add_argument(
+        "--hdf5_folder", required=True, help="Output folder for preprocessed HDF5 chunks"
+    )
+    parser.add_argument(
+        "--tss_file",
+        required=True,
+        help="TSV of TSS positions to center training windows on",
+    )
+    parser.add_argument(
+        "--fasta_file", required=True, help="Reference genome FASTA (indexed with pyfaidx)"
+    )
+    parser.add_argument(
+        "--bigwig_files",
+        required=True,
+        help="TSV mapping track names to BigWig file paths",
+    )
+    parser.add_argument("--chrom", required=True, help="Chromosome to preprocess (e.g. chr1)")
+    parser.add_argument(
+        "--input_length", type=int, required=True, help="Input sequence length in bp"
+    )
+    parser.add_argument(
+        "--output_length", type=int, required=True, help="Output track length in bp"
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=256,
+        help="Number of samples per output HDF5 file (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.hdf5_folder, exist_ok=True)

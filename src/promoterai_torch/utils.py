@@ -63,6 +63,7 @@ def make_lr_lambda(total_epochs: int) -> Callable[[int], float]:
     """Return a lr_lambda for LambdaLR: linear warmup 0–10%, constant 10–90%, linear decay 90–100%."""
 
     def lr_lambda(epoch: int) -> float:
+        """Return the triangular schedule scale factor in [0, 1] for this epoch."""
         if epoch < 0.1 * total_epochs:
             return (epoch + 1) / (0.1 * total_epochs)
         elif epoch > 0.9 * total_epochs:
@@ -224,6 +225,8 @@ def load_pretrained(checkpoint_path: str, map_location: str = "cpu"):
 
 
 class CSVLogger:
+    """Append-only CSV writer that infers its header from the first logged row."""
+
     def __init__(self, path: str):
         """Open (or append to) a CSV log file at path; writes header on first call to log()."""
         self.path = path
@@ -242,13 +245,29 @@ class CSVLogger:
 
 def add_wandb_args(parser):
     """Add optional Weights & Biases logging arguments to a training parser."""
-    parser.add_argument("--wandb_project", default=None)
-    parser.add_argument("--wandb_entity", default=None)
-    parser.add_argument("--wandb_run_name", default=None)
     parser.add_argument(
-        "--wandb_mode", choices=("online", "offline", "disabled"), default=None
+        "--wandb_project",
+        default=None,
+        help="W&B project name; enables logging when set (default: disabled)",
     )
-    parser.add_argument("--wandb_tags", nargs="*", default=[])
+    parser.add_argument(
+        "--wandb_entity", default=None, help="W&B entity (team/user) to log runs under"
+    )
+    parser.add_argument(
+        "--wandb_run_name", default=None, help="Name for the W&B run (default: W&B auto-generated)"
+    )
+    parser.add_argument(
+        "--wandb_mode",
+        choices=("online", "offline", "disabled"),
+        default=None,
+        help="Override W&B's sync mode; 'disabled' skips logging even if --wandb_project is set",
+    )
+    parser.add_argument(
+        "--wandb_tags",
+        nargs="*",
+        default=[],
+        help="Space-separated tags to attach to the W&B run",
+    )
 
 
 def init_wandb(args, config: dict, rank: int = 0):
@@ -368,6 +387,7 @@ def convert_tf_weights(
         raise ValueError("No shortcut_{species}{N} output head weights found.")
 
     def _shortcut_key(species, block_num):
+        """Return the Keras weight name for a species' shortcut projection at block_num."""
         return (
             f"shortcut_{species}{block_num}/kernel"
             if species
@@ -414,6 +434,7 @@ def convert_tf_weights(
         bp = f"blocks.{i}"
 
         def _bn(pt_pfx, keras_bn):
+            """Copy a Keras BatchNormalization layer's params/stats into new_sd at pt_pfx."""
             new_sd[f"{pt_pfx}.weight"] = torch.from_numpy(w[f"{kp}/{keras_bn}/gamma"])
             new_sd[f"{pt_pfx}.bias"] = torch.from_numpy(w[f"{kp}/{keras_bn}/beta"])
             new_sd[f"{pt_pfx}.running_mean"] = torch.from_numpy(

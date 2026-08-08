@@ -33,19 +33,56 @@ def _collate_variant(batch):
 def main():
     """Score variants and write tanh-scaled scores to a TSV alongside the input columns."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_checkpoint", required=True)
-    parser.add_argument("--var_file", required=True)
-    parser.add_argument("--fasta_file", required=True)
-    parser.add_argument("--input_length", type=int, required=True)
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--device", default=None)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument(
+        "--model_checkpoint",
+        required=True,
+        help="Path to a trained/converted PyTorch checkpoint (.pt)",
+    )
+    parser.add_argument(
+        "--var_file",
+        required=True,
+        help="TSV of variants to score, with chrom/pos/ref/alt/strand columns",
+    )
+    parser.add_argument(
+        "--fasta_file", required=True, help="Reference genome FASTA (indexed with pyfaidx)"
+    )
+    parser.add_argument(
+        "--input_length",
+        type=int,
+        required=True,
+        help="Input sequence length in bp (must match the model checkpoint)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Number of variants scored per forward pass (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Device to score on (default: cuda if available, else cpu)",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes for sequence extraction (default: %(default)s)",
+    )
     parser.add_argument(
         "--output",
         default=None,
         help="Output path (default: <var_file_stem>.<model_stem><ext>)",
     )
-    parser.add_argument("--verbose", action="store_true", default=False)
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="torch.compile the model; pays off on large variant files, not small ones",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", default=False, help="Show a tqdm progress bar"
+    )
     args = parser.parse_args()
 
     if args.device:
@@ -56,6 +93,8 @@ def main():
     base_model, _ = load_pretrained(args.model_checkpoint, map_location=str(device))
     twin_model = TwinModel(base_model).to(device)
     twin_model.eval()
+    if args.compile:
+        twin_model = torch.compile(twin_model)
 
     df_var = pd.read_csv(args.var_file, sep="\t")
     dataset = VariantDataset(df_var, args.fasta_file, args.input_length)

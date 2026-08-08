@@ -38,6 +38,7 @@ def _score_jobs(
     hg38_finetune_checkpoint: str | Path,
     hg38_mm10_finetune_checkpoint: str | Path | None,
 ) -> tuple[tuple[str, str | Path], ...]:
+    """Return (output_column, checkpoint) pairs for the checkpoints that were provided."""
     jobs: list[tuple[str, str | Path]] = [
         ("hg38_finetune_score", hg38_finetune_checkpoint)
     ]

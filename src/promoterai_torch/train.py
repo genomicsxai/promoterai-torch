@@ -99,6 +99,7 @@ def compute_loss(outputs, y_tuple, w_tuple):
 
 
 def _sync_for_timing(device: torch.device, enabled: bool) -> None:
+    """Block until pending CUDA work completes, but only when timing is being profiled."""
     if enabled and device.type == "cuda":
         torch.cuda.synchronize(device)
 
@@ -359,41 +360,133 @@ def _shutdown_dataloader(loader) -> None:
 def main():
     """Parse args, build datasets and model, run training loop, save best checkpoint."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint_folder", required=True)
-    parser.add_argument("--hdf5_human_folder", required=True)
-    parser.add_argument("--hdf5_nonhuman_folders", nargs="+", default=[])
-    parser.add_argument("--input_length", type=int, required=True)
-    parser.add_argument("--output_length", type=int, required=True)
-    parser.add_argument("--num_blocks", type=int, required=True)
-    parser.add_argument("--model_dim", type=int, required=True)
+    parser.add_argument(
+        "--checkpoint_folder",
+        required=True,
+        help="Directory to write best_model.pt/latest_model.pt and logs.csv to",
+    )
+    parser.add_argument(
+        "--hdf5_human_folder",
+        required=True,
+        help="Preprocessed human HDF5 folder (chr1-20 train, chr21-22 val)",
+    )
+    parser.add_argument(
+        "--hdf5_nonhuman_folders",
+        nargs="+",
+        default=[],
+        help="Additional per-species preprocessed HDF5 folders (all chroms used for training)",
+    )
+    parser.add_argument(
+        "--input_length",
+        type=int,
+        required=True,
+        help="Input sequence length in bp (must match preprocessed HDF5 chunks)",
+    )
+    parser.add_argument(
+        "--output_length",
+        type=int,
+        required=True,
+        help="Output track length in bp (must match preprocessed HDF5 chunks)",
+    )
+    parser.add_argument(
+        "--num_blocks", type=int, required=True, help="Number of MetaFormer blocks (model depth)"
+    )
+    parser.add_argument(
+        "--model_dim", type=int, required=True, help="Channel width of the MetaFormer backbone"
+    )
     parser.add_argument(
         "--batch_size",
         type=int,
         required=True,
         help="Global training batch size; divided evenly across DDP ranks",
     )
-    parser.add_argument("--learning_rate", type=float, default=5e-4)
-    parser.add_argument("--weight_decay", type=float, default=5e-6)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--prefetch_factor", type=int, default=2)
-    parser.add_argument("--profile_batches", type=int, default=0)
-    parser.add_argument("--profile_warmup_batches", type=int, default=10)
-    parser.add_argument("--no_sync_batchnorm", action="store_true", default=False)
-    parser.add_argument("--compile", action="store_true", default=False)
     parser.add_argument(
-        "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+        "--learning_rate",
+        type=float,
+        default=5e-4,
+        help="Peak learning rate (default: %(default)s)",
     )
-    parser.add_argument("--resume_checkpoint", default=None)
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=5e-6,
+        help="Peak weight decay (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=100, help="Number of epochs to train for (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=2,
+        help="Batches prefetched per DataLoader worker (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--profile_batches",
+        type=int,
+        default=0,
+        help="Batches to profile after warmup, then exit before validation; 0 disables profiling",
+    )
+    parser.add_argument(
+        "--profile_warmup_batches",
+        type=int,
+        default=10,
+        help="Unprofiled warmup batches before the profiling window starts (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no_sync_batchnorm",
+        action="store_true",
+        default=False,
+        help="Disable SyncBatchNorm conversion in multi-GPU runs",
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="torch.compile the model (adds startup warmup, speeds up steady-state throughput)",
+    )
+    parser.add_argument(
+        "--amp_dtype",
+        choices=("none", "bf16", "fp16"),
+        default="none",
+        help="Mixed-precision dtype for autocast; 'none' trains in full precision",
+    )
+    parser.add_argument(
+        "--resume_checkpoint",
+        default=None,
+        help="Explicit checkpoint path to resume from (overrides --auto_resume)",
+    )
     parser.add_argument(
         "--auto_resume",
         action="store_true",
         default=False,
         help="Resume from checkpoint_folder/latest_model.pt when it exists",
     )
-    parser.add_argument("--no_progress", action="store_true", default=False)
-    parser.add_argument("--log_every_batches", type=int, default=0)
-    parser.add_argument("--wandb_log_every_batches", type=int, default=0)
+    parser.add_argument(
+        "--no_progress",
+        action="store_true",
+        default=False,
+        help="Disable tqdm progress bars (recommended for non-interactive logs)",
+    )
+    parser.add_argument(
+        "--log_every_batches",
+        type=int,
+        default=0,
+        help="Print a batch-loss line every N batches; 0 disables",
+    )
+    parser.add_argument(
+        "--wandb_log_every_batches",
+        type=int,
+        default=0,
+        help="Log batch-level metrics to W&B every N batches; 0 reuses --log_every_batches "
+        "(epoch metrics are always logged when W&B is enabled)",
+    )
     add_wandb_args(parser)
     args = parser.parse_args()
 

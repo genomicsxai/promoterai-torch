@@ -29,77 +29,238 @@ def main():
     p_pre = sub.add_parser(
         "preprocess", help="Build HDF5 training data from TSS/FASTA/BigWig"
     )
-    p_pre.add_argument("--hdf5_folder", required=True)
-    p_pre.add_argument("--tss_file", required=True)
-    p_pre.add_argument("--fasta_file", required=True)
-    p_pre.add_argument("--bigwig_files", required=True)
-    p_pre.add_argument("--chrom", required=True)
-    p_pre.add_argument("--input_length", type=int, required=True)
-    p_pre.add_argument("--output_length", type=int, required=True)
-    p_pre.add_argument("--chunk_size", type=int, default=256)
+    p_pre.add_argument(
+        "--hdf5_folder", required=True, help="Output folder for preprocessed HDF5 chunks"
+    )
+    p_pre.add_argument(
+        "--tss_file",
+        required=True,
+        help="TSV of TSS positions to center training windows on",
+    )
+    p_pre.add_argument(
+        "--fasta_file", required=True, help="Reference genome FASTA (indexed with pyfaidx)"
+    )
+    p_pre.add_argument(
+        "--bigwig_files",
+        required=True,
+        help="TSV mapping track names to BigWig file paths",
+    )
+    p_pre.add_argument("--chrom", required=True, help="Chromosome to preprocess (e.g. chr1)")
+    p_pre.add_argument(
+        "--input_length", type=int, required=True, help="Input sequence length in bp"
+    )
+    p_pre.add_argument(
+        "--output_length", type=int, required=True, help="Output track length in bp"
+    )
+    p_pre.add_argument(
+        "--chunk_size",
+        type=int,
+        default=256,
+        help="Number of samples per output HDF5 file (default: %(default)s)",
+    )
 
     # ── train ─────────────────────────────────────────────────────────────────
     p_train = sub.add_parser(
         "train",
         help="Train PromoterAI (torchrun-compatible for multi-GPU)",
     )
-    p_train.add_argument("--checkpoint_folder", required=True)
-    p_train.add_argument("--hdf5_human_folder", required=True)
-    p_train.add_argument("--hdf5_nonhuman_folders", nargs="+", default=[])
-    p_train.add_argument("--input_length", type=int, required=True)
-    p_train.add_argument("--output_length", type=int, required=True)
-    p_train.add_argument("--num_blocks", type=int, required=True)
-    p_train.add_argument("--model_dim", type=int, required=True)
+    p_train.add_argument(
+        "--checkpoint_folder",
+        required=True,
+        help="Directory to write best_model.pt/latest_model.pt and logs.csv to",
+    )
+    p_train.add_argument(
+        "--hdf5_human_folder",
+        required=True,
+        help="Preprocessed human HDF5 folder (chr1-20 train, chr21-22 val)",
+    )
+    p_train.add_argument(
+        "--hdf5_nonhuman_folders",
+        nargs="+",
+        default=[],
+        help="Additional per-species preprocessed HDF5 folders (all chroms used for training)",
+    )
+    p_train.add_argument(
+        "--input_length",
+        type=int,
+        required=True,
+        help="Input sequence length in bp (must match preprocessed HDF5 chunks)",
+    )
+    p_train.add_argument(
+        "--output_length",
+        type=int,
+        required=True,
+        help="Output track length in bp (must match preprocessed HDF5 chunks)",
+    )
+    p_train.add_argument(
+        "--num_blocks", type=int, required=True, help="Number of MetaFormer blocks (model depth)"
+    )
+    p_train.add_argument(
+        "--model_dim", type=int, required=True, help="Channel width of the MetaFormer backbone"
+    )
     p_train.add_argument(
         "--batch_size",
         type=int,
         required=True,
         help="Global training batch size; divided evenly across DDP ranks",
     )
-    p_train.add_argument("--learning_rate", type=float, default=5e-4)
-    p_train.add_argument("--weight_decay", type=float, default=5e-6)
-    p_train.add_argument("--epochs", type=int, default=100)
-    p_train.add_argument("--num_workers", type=int, default=4)
-    p_train.add_argument("--prefetch_factor", type=int, default=2)
-    p_train.add_argument("--profile_batches", type=int, default=0)
-    p_train.add_argument("--profile_warmup_batches", type=int, default=10)
-    p_train.add_argument("--no_sync_batchnorm", action="store_true", default=False)
-    p_train.add_argument("--compile", action="store_true", default=False)
     p_train.add_argument(
-        "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+        "--learning_rate",
+        type=float,
+        default=5e-4,
+        help="Peak learning rate (default: %(default)s)",
     )
-    p_train.add_argument("--resume_checkpoint", default=None)
+    p_train.add_argument(
+        "--weight_decay",
+        type=float,
+        default=5e-6,
+        help="Peak weight decay (default: %(default)s)",
+    )
+    p_train.add_argument(
+        "--epochs", type=int, default=100, help="Number of epochs to train for (default: %(default)s)"
+    )
+    p_train.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes (default: %(default)s)",
+    )
+    p_train.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=2,
+        help="Batches prefetched per DataLoader worker (default: %(default)s)",
+    )
+    p_train.add_argument(
+        "--profile_batches",
+        type=int,
+        default=0,
+        help="Batches to profile after warmup, then exit before validation; 0 disables profiling",
+    )
+    p_train.add_argument(
+        "--profile_warmup_batches",
+        type=int,
+        default=10,
+        help="Unprofiled warmup batches before the profiling window starts (default: %(default)s)",
+    )
+    p_train.add_argument(
+        "--no_sync_batchnorm",
+        action="store_true",
+        default=False,
+        help="Disable SyncBatchNorm conversion in multi-GPU runs",
+    )
+    p_train.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="torch.compile the model (adds startup warmup, speeds up steady-state throughput)",
+    )
+    p_train.add_argument(
+        "--amp_dtype",
+        choices=("none", "bf16", "fp16"),
+        default="none",
+        help="Mixed-precision dtype for autocast; 'none' trains in full precision",
+    )
+    p_train.add_argument(
+        "--resume_checkpoint",
+        default=None,
+        help="Explicit checkpoint path to resume from (overrides --auto_resume)",
+    )
     p_train.add_argument(
         "--auto_resume",
         action="store_true",
         default=False,
         help="Resume from checkpoint_folder/latest_model.pt when it exists",
     )
-    p_train.add_argument("--no_progress", action="store_true", default=False)
-    p_train.add_argument("--log_every_batches", type=int, default=0)
-    p_train.add_argument("--wandb_log_every_batches", type=int, default=0)
+    p_train.add_argument(
+        "--no_progress",
+        action="store_true",
+        default=False,
+        help="Disable tqdm progress bars (recommended for non-interactive logs)",
+    )
+    p_train.add_argument(
+        "--log_every_batches",
+        type=int,
+        default=0,
+        help="Print a batch-loss line every N batches; 0 disables",
+    )
+    p_train.add_argument(
+        "--wandb_log_every_batches",
+        type=int,
+        default=0,
+        help="Log batch-level metrics to W&B every N batches; 0 reuses --log_every_batches "
+        "(epoch metrics are always logged when W&B is enabled)",
+    )
     add_wandb_args(p_train)
 
     # ── finetune ──────────────────────────────────────────────────────────────
     p_ft = sub.add_parser("finetune", help="Fine-tune on GTEx rare variant outliers")
-    p_ft.add_argument("--model_checkpoint", required=True)
-    p_ft.add_argument("--var_file", required=True)
-    p_ft.add_argument("--fasta_file", required=True)
-    p_ft.add_argument("--input_length", type=int, required=True)
+    p_ft.add_argument(
+        "--model_checkpoint",
+        required=True,
+        help="Base PyTorch checkpoint (.pt) to fine-tune",
+    )
+    p_ft.add_argument(
+        "--var_file",
+        required=True,
+        help="TSV of GTEx-outlier-format variants to fine-tune on",
+    )
+    p_ft.add_argument(
+        "--fasta_file", required=True, help="Reference genome FASTA (indexed with pyfaidx)"
+    )
+    p_ft.add_argument(
+        "--input_length",
+        type=int,
+        required=True,
+        help="Input sequence length in bp (must match the base checkpoint)",
+    )
     p_ft.add_argument(
         "--batch_size",
         type=int,
         default=8,
         help="Global batch size; divided evenly across torchrun ranks",
     )
-    p_ft.add_argument("--learning_rate", type=float, default=5e-4)
-    p_ft.add_argument("--weight_decay", type=float, default=5e-6)
-    p_ft.add_argument("--epochs", type=int, default=100)
-    p_ft.add_argument("--num_workers", type=int, default=4)
     p_ft.add_argument(
-        "--amp_dtype", choices=("none", "bf16", "fp16"), default="none"
+        "--learning_rate",
+        type=float,
+        default=5e-4,
+        help="Peak learning rate (default: %(default)s)",
     )
-    p_ft.add_argument("--resume_checkpoint", default=None)
+    p_ft.add_argument(
+        "--weight_decay",
+        type=float,
+        default=5e-6,
+        help="Peak weight decay (default: %(default)s)",
+    )
+    p_ft.add_argument(
+        "--epochs",
+        type=int,
+        default=100,
+        help="Total target epoch count (default: %(default)s)",
+    )
+    p_ft.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes (default: %(default)s)",
+    )
+    p_ft.add_argument(
+        "--amp_dtype",
+        choices=("none", "bf16", "fp16"),
+        default="none",
+        help="Mixed-precision dtype for autocast; 'none' trains in full precision",
+    )
+    p_ft.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="torch.compile the twin model (adds startup warmup, speeds up steady-state throughput)",
+    )
+    p_ft.add_argument(
+        "--resume_checkpoint",
+        default=None,
+        help="Explicit checkpoint path to resume from (overrides --auto_resume)",
+    )
     p_ft.add_argument(
         "--auto_resume",
         action="store_true",
@@ -154,27 +315,71 @@ def main():
 
     # ── score ─────────────────────────────────────────────────────────────────
     p_score = sub.add_parser("score", help="Score variants and write output TSV")
-    p_score.add_argument("--model_checkpoint", required=True)
-    p_score.add_argument("--var_file", required=True)
-    p_score.add_argument("--fasta_file", required=True)
-    p_score.add_argument("--input_length", type=int, required=True)
-    p_score.add_argument("--batch_size", type=int, default=2)
-    p_score.add_argument("--device", default=None)
-    p_score.add_argument("--num_workers", type=int, default=4)
+    p_score.add_argument(
+        "--model_checkpoint",
+        required=True,
+        help="Path to a trained/converted PyTorch checkpoint (.pt)",
+    )
+    p_score.add_argument(
+        "--var_file",
+        required=True,
+        help="TSV of variants to score, with chrom/pos/ref/alt/strand columns",
+    )
+    p_score.add_argument(
+        "--fasta_file", required=True, help="Reference genome FASTA (indexed with pyfaidx)"
+    )
+    p_score.add_argument(
+        "--input_length",
+        type=int,
+        required=True,
+        help="Input sequence length in bp (must match the model checkpoint)",
+    )
+    p_score.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Number of variants scored per forward pass (default: %(default)s)",
+    )
+    p_score.add_argument(
+        "--device",
+        default=None,
+        help="Device to score on (default: cuda if available, else cpu)",
+    )
+    p_score.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes for sequence extraction (default: %(default)s)",
+    )
     p_score.add_argument(
         "--output",
         default=None,
         metavar="PATH",
         help="Output path (default: <var_stem>.<model_stem><ext>)",
     )
-    p_score.add_argument("-v", "--verbose", action="store_true", default=False)
+    p_score.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="torch.compile the model; pays off on large variant files, not small ones",
+    )
+    p_score.add_argument(
+        "-v", "--verbose", action="store_true", default=False, help="Show a tqdm progress bar"
+    )
 
     # ── check-hdf5 ───────────────────────────────────────────────────────────
     p_check = sub.add_parser(
         "check-hdf5", help="Check HDF5 training chunks for corruption"
     )
-    p_check.add_argument("--paths", nargs="+", required=True)
-    p_check.add_argument("--full-read", action="store_true", default=False)
+    p_check.add_argument(
+        "--paths", nargs="+", required=True, help="HDF5 files/folders to check"
+    )
+    p_check.add_argument(
+        "--full-read",
+        action="store_true",
+        default=False,
+        help="Read every x/y value instead of only first and last rows",
+    )
 
     args = parser.parse_args()
 

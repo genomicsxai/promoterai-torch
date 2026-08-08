@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it as below, and cite the
+  original PromoterAI paper (see preferred-citation) for the underlying
+  model and method.
+type: software
+title: promoterai-torch
+version: 0.1.0
+date-released: 2026-08-01
+authors:
+  - family-names: He
+    given-names: Adam
+    email: adamyhe@gmail.com
+url: https://github.com/genomicsxai/promoterai-torch
+repository-code: https://github.com/genomicsxai/promoterai-torch
+license: MIT
+keywords:
+  - bioinformatics
+  - deep-learning
+  - genomics
+  - promoter
+  - pytorch
+  - variant-effect-prediction
+  - metaformer
+preferred-citation:
+  type: article
+  title: >-
+    Predicting expression-altering promoter mutations with deep learning
+  authors:
+    - family-names: Jaganathan
+      given-names: Kishore
+    - family-names: Ersaro
+      given-names: Nazli
+    - family-names: Novakovsky
+      given-names: Gherman
+  journal: Science
+  year: 2025
+  doi: 10.1126/science.ads7373

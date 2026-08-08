@@ -18,37 +18,37 @@ an already-converted checkpoint, install the core package:
 
 ```sh
 pip install promoterai-torch
+```
+
+Or with [uv](https://docs.astral.sh/uv/):
+
+```sh
 uv add promoterai-torch
 ```
 
 Optional workflows are split into extras so inference installs do not pull in
 TensorFlow, HDF5/BigWig tooling, or attribution libraries:
 
-```sh
-# Convert Keras/TensorFlow SavedModels to PyTorch checkpoints.
-pip install "promoterai-torch[convert]"
-uv add promoterai-torch --extra convert
+| Extra       | Enables                                              |
+| ----------- | ----------------------------------------------------- |
+| `convert`   | Convert Keras/TensorFlow SavedModels to PyTorch checkpoints |
+| `train`     | Preprocess data, train from scratch, or fine-tune      |
+| `wandb`     | Weights & Biases logging (combine with `train`)        |
+| `interpret` | Run DeepLIFT/SHAP interpretation with tangermeme       |
 
-# Preprocess data, train from scratch, or fine-tune.
-pip install "promoterai-torch[train]"
-uv add promoterai-torch --extra train
-
-# Run DeepLIFT/SHAP interpretation with tangermeme.
-pip install "promoterai-torch[interpret]"
-uv add promoterai-torch --extra interpret
-
-# Training with optional Weights & Biases logging.
-pip install "promoterai-torch[train,wandb]"
-uv add promoterai-torch --extra train --extra wandb
-```
-
-Quote extras in `pip install` commands so shells such as `zsh` do not expand the
-square brackets. With `uv`, use `uv add` inside a project; for a cloned checkout,
-use `uv sync` as shown in [Development](#development).
+`uv add` is for installing into an existing project; for a
+cloned checkout with development dependencies, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Convert a pretrained Keras model
 
 First install the `[convert]` extra (see above), then download the pretrained PromoterAI SavedModel from [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI) and convert it to a PyTorch checkpoint:
+
+```sh
+pip install "promoterai-torch[convert]"
+# or 
+uv add promoterai-torch --extra convert
+```
 
 ```sh
 promoterai-torch convert \
@@ -126,6 +126,7 @@ Install the optional interpretation dependencies first:
 
 ```sh
 pip install "promoterai-torch[interpret]"
+# or 
 uv add promoterai-torch --extra interpret
 ```
 
@@ -166,106 +167,13 @@ Do note that calculating DeepLIFT/SHAP on this model is quite expensive: with TF
 
 ## Numerical equivalence
 
-### Equivalence on benchmarks from paper
-
-The public benchmark variant sets from
-[Illumina/PromoterAI](https://github.com/Illumina/PromoterAI/tree/master/data/benchmark)
-can be downloaded and scored with fine-tuned torch checkpoints. The
-benchmark script reports under/over, under/null, and over/null AUROCs from
-`hg38_finetune` scores, or from the average of signed `hg38_finetune` and
-`hg38_mm10_finetune` variant scores when both checkpoints are provided:
-
-```sh
-python examples/paper_benchmark/download_benchmark_data.py \
-    --output_dir data/benchmark
-
-python examples/paper_benchmark/benchmark_variant_scores.py \
-    --benchmark_dir data/benchmark \
-    --hg38_finetune_checkpoint models/promoterAI_v1_hg38_finetune.pt \
-    --hg38_mm10_finetune_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
-    --fasta_file hg38.fa \
-    --output_dir results/benchmark \
-    --batch_size 2 \
-    --device cuda
-```
-
-Per-dataset scored TSVs are written to `results/benchmark/*.scores.tsv`, and
-the AUROC summary is written to `results/benchmark/benchmark_aurocs.tsv`.
-Run one or more datasets by adding `--dataset GTEx_outlier` (repeatable). To
-split each dataset across multiple GPUs, pass a device list:
-
-```sh
-python examples/paper_benchmark/benchmark_variant_scores.py \
-    --benchmark_dir data/benchmark \
-    --dataset GTEx_outlier \
-    --hg38_finetune_checkpoint models/promoterAI_v1_hg38_finetune.pt \
-    --hg38_mm10_finetune_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
-    --fasta_file hg38.fa \
-    --output_dir results/benchmark/GTEx_outlier \
-    --batch_size 2 \
-    --devices cuda:0 cuda:1 cuda:2 cuda:3
-```
-
-Omit `--hg38_mm10_finetune_checkpoint` to benchmark with only the
-`hg38_finetune` checkpoint.
-
-To benchmark the official TensorFlow/Keras SavedModels from
-[Illumina/PromoterAI](https://github.com/Illumina/PromoterAI), install the
-official `promoterai` package in an environment with TensorFlow and use the
-matching TensorFlow script. This standalone script does not require installing
-`promoterai-torch`.
-
-```sh
-python examples/paper_benchmark/benchmark_variant_scores_tf.py \
-    --benchmark_dir data/benchmark \
-    --dataset GTEx_outlier \
-    --hg38_finetune_model_folder models/promoterAI_v1_hg38_finetune \
-    --hg38_mm10_finetune_model_folder models/promoterAI_v1_hg38_mm10_finetune \
-    --fasta_file hg38.fa \
-    --output_dir results/benchmark_tf/GTEx_outlier \
-    --batch_size 1 \
-    --devices 0 1 2 3
-```
-
-After running both benchmark paths, open
-`examples/paper_benchmark/plot_torch_vs_tensorflow_scores.ipynb` to make
-per-dataset and combined scatterplots of torch versus TensorFlow ensemble
-scores. This port and the original TF model produce near equivalent scores, and both also match the published AUROCs.
+This port produces near-identical scores and regulatory track predictions to
+the original TensorFlow/Keras implementation, matching the published AUROCs.
+See [docs/numerical-equivalence.md](docs/numerical-equivalence.md) for
+benchmark reproduction steps, per-variant concordance results, and
+full-track comparison scripts.
 
 ![SFSWAP scatter](examples/img/paper_benchmark_concordance.png)
-
-### Equivalence on (subset of) published all-promoter variants dataset
-
-Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the original TF/Keras implementation on *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3003), and *DNAJC9* (*n* = 9009) promoter variants. Scores are identical across all comparisons, including the ensembled scores against the published PromoterAI variant scores (Pearson r = 1.0000, MAE = 0.0000). See `examples/` for details. Note that this repo follows the official PromoterAI and rounds variant scores to 4 decimal places.
-
-![TERT scatter](examples/img/TERT_scatter.png)
-![SFSWAP scatter](examples/img/SFSWAP_scatter.png)
-![DNAJC9 scatter](examples/img/DNAJC9_scatter.png)
-
-The example scripts can also compare the full predicted regulatory tracks from the original TF/Keras SavedModel and the converted PyTorch checkpoint. This reports mean and max absolute error per input sequence and output head.
-
-```sh
-python examples/track_benchmark/compare_tf_torch_tracks_promoters.py \
-    --keras_model models/promoterAI_v1_hg38_mm10_finetune \
-    --torch_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
-    --fasta hg38.fa \
-    --promoter DNAJC9:chr10:73247254:- \
-    --promoter TERT:chr5:1294988:- \
-    --promoter SFSWAP:chr12:131710589:+
-
-python examples/track_benchmark/compare_tf_torch_tracks_random.py \
-    --keras_model models/promoterAI_v1_hg38_mm10_finetune \
-    --torch_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \
-    --n_sequences 8 \
-    --seed 0
-```
-
-Both track parity scripts default to a VRAM-safe separate-loop mode: TensorFlow
-runs first in a child process, writes temporary memmaps, exits to release CUDA
-memory, and then PyTorch runs. Pass `--interleaved` only for small debugging
-runs where both runtimes fit in GPU memory.
-
-Errors are ~1e-7 (<1e-4) when run at FP32, i.e., within machine precision, when comparing all four official TF/Keras SavedModels (`hg38`, `hg38_mm10`, `hg38_finetune`, and `hg38_mm10_finetune`) against their PyTorch checkpoints.
 
 ## Training models
 
@@ -273,178 +181,19 @@ Errors are ~1e-7 (<1e-4) when run at FP32, i.e., within machine precision, when 
 > I have verified that this code executes and can train/finetune models. I have also endeavored to make sure that it aligns with the training/finetuning behavior of the official PromoterAI repo. However, I have not attempted to reproduce their models, and cannot ensure there isn't some hidden divergence in some low-level PyTorch vs Tensorflow/Keras behavior.
 
 Fine-tuning or training from scratch using the built-in scripts requires the
-`train` extra described in [Install](#install).
-
-Weights & Biases logging is optional for training and fine-tuning:
-
-```sh
-pip install "promoterai-torch[train,wandb]"
-uv add promoterai-torch --extra train --extra wandb
-```
-
-### Data preprocessing
-
-We follow the original PromoterAI's repo and preprocess track and sequence data into chunks for training. This needs to be done separately for each chromosome, e.g.
-
-```sh
-promoterai-torch preprocess \
-    --hdf5_folder data/hdf5/human --tss_file tss_hg38.tsv \
-    --fasta_file hg38.fa --bigwig_files hg38_tracks.tsv \
-    --chrom chr1 --input_length 32768 --output_length 16384
-```
-
-Once done, you can then train on this dataset.
-
-Check the generated chunks before launching a long run:
-
-```sh
-promoterai-torch check-hdf5 \
-    --paths data/hdf5/human data/hdf5/mouse
-```
-
-Add `--full-read` to read every `x` and `y` dataset value instead of the default
-first/last-row check.
-
-```sh
-promoterai-torch train \
-    --checkpoint_folder checkpoints/run1 \
-    --hdf5_human_folder data/hdf5/human \
-    --input_length 20480 --output_length 4096 \
-    --num_blocks 24 --model_dim 1024 --batch_size 32 \
-    --wandb_project promoterai-torch
-```
-
-Training shows rank-0 train/validation progress bars by default. Use
-`--log_every_batches 100` for explicit batch-loss lines, or `--no_progress` in
-non-interactive logs. W&B always receives epoch loss/LR/weight-decay metrics
-when enabled; use `--wandb_log_every_batches 100` to also log batch losses.
-If omitted, `--log_every_batches` is reused as the W&B batch logging cadence.
-
-Training writes `best_model.pt` when validation improves and `latest_model.pt`
-after every epoch. `best_model.pt` contains only model weights and architecture
-arguments for inference, while `latest_model.pt` also contains optimizer and
-other training state needed to resume. Resume a pre-empted run explicitly:
-
-```sh
-promoterai-torch train \
-    --checkpoint_folder checkpoints/run1 \
-    --hdf5_human_folder data/hdf5/human \
-    --input_length 20480 --output_length 4096 \
-    --num_blocks 24 --model_dim 1024 --batch_size 32 \
-    --resume_checkpoint checkpoints/run1/latest_model.pt
-```
-
-Or opt into automatic epoch-level resumption from
-`<checkpoint_folder>/latest_model.pt` when it exists:
-
-```sh
-promoterai-torch train \
-    --checkpoint_folder checkpoints/run1 \
-    --hdf5_human_folder data/hdf5/human \
-    --input_length 20480 --output_length 4096 \
-    --num_blocks 24 --model_dim 1024 --batch_size 32 \
-    --auto_resume
-```
-
-Multi-GPU training is supported via `torchrun`:
-
-```sh
-torchrun --nproc_per_node=4 -m promoterai_torch.train \
-    --checkpoint_folder checkpoints/run1 \
-    --hdf5_human_folder data/hdf5/human \
-    --hdf5_nonhuman_folders data/hdf5/mouse \
-    --input_length 20480 --output_length 4096 \
-    --num_blocks 24 --model_dim 1024 --batch_size 32
-```
-
-For training, `--batch_size` is the global batch size. In multi-GPU runs it must
-divide evenly by the number of ranks; the script uses `batch_size / world_size`
-per GPU. For example, `--batch_size 32` with 8 GPUs uses 4 samples per GPU and
-keeps `steps_per_epoch=int(sum(dataset_sizes) / 10)` independent of GPU count.
-
-### Fine-tune on variants
-
-```sh
-promoterai-torch finetune \
-    --model_checkpoint best_model.pt \
-    --var_file data/annotation/finetune_gtex.tsv \
-    --fasta_file hg38.fa \
-    --input_length 20480 \
-    --batch_size 8 \
-    --epochs 100 \
-    --amp_dtype bf16 \
-    --wandb_project promoterai-torch --wandb_run_name gtex-finetune
-```
-
-Mixed precision is opt-in via `--amp_dtype bf16` or `--amp_dtype fp16`;
-the default is full-precision training. The fine-tuned base model is saved to
-`best_model_finetune/best_model.pt`. Only the first output head is trained; all
-other weights are frozen.
-
-Finetuning also writes `best_model_finetune/latest_model.pt` after every
-completed epoch. Resume automatically after a preemption with `--auto_resume`,
-or select a checkpoint explicitly with `--resume_checkpoint PATH`. An explicit
-checkpoint takes precedence, and `--epochs` remains the total target epoch
-count.
-
-Multi-GPU finetuning is supported through `torchrun`:
-
-```sh
-torchrun --nproc_per_node=4 -m promoterai_torch.finetune \
-    --model_checkpoint best_model.pt \
-    --var_file data/annotation/finetune_gtex.tsv \
-    --fasta_file hg38.fa \
-    --input_length 20480 \
-    --batch_size 8 \
-    --amp_dtype bf16
-```
-
-`--batch_size` is global and must divide evenly across ranks. The frozen
-backbone, including BatchNorm statistics, remains in inference mode; only the
-first output head is updated.
-
-To strip optimizer and other training state from an existing checkpoint:
-
-```sh
-promoterai-torch export-inference \
-    --checkpoint checkpoints/run1/latest_model.pt \
-    --output checkpoints/run1/model_inference.pt
-```
-
-The variant TSV must include `chrom`, `pos`, `ref`, `alt`, `strand`, `z` (expression z-score target), `in_cds`, `spliceai`, `p_under`, `p_over`, `gene` columns (matching the GTEx outlier format).
+`train` extra described in [Install](#install). See
+[docs/training.md](docs/training.md) for data preprocessing, training from
+scratch, fine-tuning on variants, and multi-GPU usage.
 
 ## Development
 
-Clone the repository and install local development dependencies with `uv`
-dependency groups:
-
-```sh
-uv sync --group dev
-uv run pytest tests/ -v
-```
-
-Use the narrower groups when you only need one workflow:
-
-```sh
-uv sync --group test
-uv run pytest tests/ -v
-
-uv sync --group publish
-uv run python -m build
-uv run python -m twine check dist/*
-```
-
-For a `pip`-only editable install, install the package and development tools
-directly:
-
-```sh
-python -m pip install -e .
-python -m pip install pytest h5py scipy pybigtools tangermeme build twine
-python -m pytest tests/ -v
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setting up a local development
+environment and running the test suite.
 
 ## Reference
 
 Jaganathan, Ersaro, Novakovsky et al. *Science* (2025) Predicting expression-altering promoter mutations with deep learning. doi:10.1126/science.ads7373
 
 Original TF implementation: [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI)
+
+Citation metadata for this software is available in [CITATION.cff](CITATION.cff).

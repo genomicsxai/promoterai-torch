@@ -177,13 +177,10 @@ full-track comparison scripts.
 
 ## Training models
 
-> [!Warning]
-> I have verified that this code executes and can train/finetune models. I have also endeavored to make sure that it aligns with the training/finetuning behavior of the official PromoterAI repo. However, I have not attempted to reproduce their models, and cannot ensure there isn't some hidden divergence in some low-level PyTorch vs Tensorflow/Keras behavior.
-
 Fine-tuning or training from scratch using the built-in scripts requires the
-`train` extra described in [Install](#install). See
-[docs/training.md](docs/training.md) for data preprocessing, training from
-scratch, fine-tuning on variants, and multi-GPU usage.
+`train` extra described in [Install](#install) (with an optional `wandb` extra
+for wandb.ai integration. See [docs/training.md](docs/training.md) for data
+preprocessing, training from scratch, fine-tuning on variants, and multi-GPU usage.
 
 ## Development
 

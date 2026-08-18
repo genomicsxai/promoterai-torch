@@ -1,6 +1,6 @@
 # promoterai-torch
 
-[![PyPI](https://img.shields.io/pypi/v/promoterai-torch)](https://pypi.org/project/promoterai-torch/) [![Tests](https://github.com/adamyhe/promoterai-torch/actions/workflows/tests.yml/badge.svg)](https://github.com/adamyhe/promoterai-torch/actions/workflows/tests.yml) [![PyPI Downloads](https://static.pepy.tech/personalized-badge/promoterai-torch?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/promoterai-torch)
+[![PyPI](https://img.shields.io/pypi/v/promoterai-torch)](https://pypi.org/project/promoterai-torch/) [![Tests](https://github.com/genomicsxai/promoterai-torch/actions/workflows/tests.yml/badge.svg)](https://github.com/genomicsxai/promoterai-torch/actions/workflows/tests.yml) [![PyPI Downloads](https://static.pepy.tech/personalized-badge/promoterai-torch?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/promoterai-torch)
 
 A PyTorch port of [PromoterAI](https://github.com/Illumina/PromoterAI) v1 from Illumina — a deep learning model that predicts the regulatory impact of promoter DNA variants on gene expression.
 
@@ -161,7 +161,7 @@ attributions = deep_lift_shap(wrapper, x, n_shuffles=20, device="cuda", batch_si
 # attributions: (B, 4, input_length) — per-position, per-base importance
 ```
 
-![SFSWAP DeepLIFTSHAP](examples/img/deepliftshap.png)
+![SFSWAP DeepLIFTSHAP](https://raw.githubusercontent.com/genomicsxai/promoterai-torch/main/examples/img/deepliftshap.png)
 
 Do note that calculating DeepLIFT/SHAP on this model is quite expensive: with TF32, `n_shuffles=20`, and `batch_size=1`, it takes ~92s/sequence with ~71GB VRAM used on an A100 80GB.
 
@@ -173,7 +173,7 @@ See [docs/numerical-equivalence.md](docs/numerical-equivalence.md) for
 benchmark reproduction steps, per-variant concordance results, and
 full-track comparison scripts.
 
-![SFSWAP scatter](examples/img/paper_benchmark_concordance.png)
+![SFSWAP scatter](https://raw.githubusercontent.com/genomicsxai/promoterai-torch/main/examples/img/paper_benchmark_concordance.png)
 
 ## Training models
 

@@ -99,7 +99,7 @@ with torch.no_grad():
 track_predictions = predictions[0]   # (1, output_length, n_tracks) — arcsinh-scale signal
 ```
 
-The output is one tensor per species head. Each tensor has shape `(batch, output_length, n_tracks)` where `n_tracks=498` for the published human head (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq) and `n_tracks=??` for the mouse head.
+The output is one tensor per species head. Each tensor has shape `(batch, output_length, n_tracks)` where `n_tracks=498` for the published human head (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq) and `n_tracks=472` for the mouse head (per Illumina's released `data/bigwig/mm10.tsv` track list).
 
 ### Extract embeddings
 

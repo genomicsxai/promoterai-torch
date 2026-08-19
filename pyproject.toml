@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "promoterai-torch"
-version = "0.1.0.post1"
+version = "0.2.0"
 description = "PyTorch port of PromoterAI for promoter variant scoring."
 authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
 license = "MIT"
@@ -40,6 +40,7 @@ dependencies = [
     "pandas>=2.0",
     "pyfaidx>=0.8",
     "tqdm>=4.0",
+    "numba>=0.58",
 ]
 
 [project.urls]
@@ -53,7 +54,7 @@ convert = [
     "tensorflow; sys_platform == 'darwin'",
     "tf-keras",
 ]
-train = ["h5py>=3.0", "scipy>=1.10", "pybigtools>=0.2.5"]
+train = ["h5py>=3.0", "pybigtools>=0.2.5"]
 interpret = ["tangermeme>=0.5"]
 wandb = ["wandb>=0.16"]
 
@@ -61,7 +62,6 @@ wandb = ["wandb>=0.16"]
 test = [
     "pytest>=8",
     "h5py>=3.0",
-    "scipy>=1.10",
     "pybigtools>=0.2.5",
     "tangermeme>=0.5",
 ]

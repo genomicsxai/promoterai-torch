@@ -26,7 +26,7 @@ directly:
 
 ```sh
 python -m pip install -e .
-python -m pip install pytest h5py scipy pybigtools tangermeme build twine
+python -m pip install pytest h5py pybigtools tangermeme build twine
 python -m pytest tests/ -v
 ```
 

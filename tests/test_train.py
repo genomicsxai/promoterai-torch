@@ -6,11 +6,13 @@ from torch.utils.data import DataLoader, Dataset
 from promoterai_torch.architecture import PromoterAI
 from promoterai_torch.train import (
     _run_epoch,
+    build_train_optimizer,
     compute_loss,
     load_training_checkpoint,
     resolve_amp_dtype,
     resolve_per_rank_batch_size,
     resolve_resume_checkpoint,
+    resolve_train_steps_per_epoch,
 )
 from promoterai_torch.utils import save_checkpoint
 
@@ -28,6 +30,24 @@ def test_resolve_per_rank_batch_size_rejects_non_divisible_global_batch():
         assert "divisible" in str(exc)
     else:
         raise AssertionError("Expected non-divisible global batch size to fail")
+
+
+def test_resolve_train_steps_per_epoch_divides_out_batch_size():
+    # Illumina's train.py counts pre-batched tf.data elements (i.e. batches,
+    # not raw samples) before dividing by 10, so dataset_sizes (raw sample
+    # counts) must be divided by the global batch size first to match —
+    # otherwise steps_per_epoch (and thus samples trained per epoch) comes
+    # out global_batch_size times too large.
+    assert resolve_train_steps_per_epoch([10000], global_batch_size=10) == 100
+    assert resolve_train_steps_per_epoch([7000, 3000], global_batch_size=10) == 100
+
+
+def test_build_train_optimizer_matches_keras_epsilon_default():
+    model = nn.Linear(2, 2)
+    optimizer = build_train_optimizer(model, learning_rate=5e-4, weight_decay=5e-6)
+    assert optimizer.defaults["eps"] == 1e-7
+    assert optimizer.defaults["lr"] == 5e-4
+    assert optimizer.defaults["weight_decay"] == 5e-6
 
 
 def test_resolve_amp_dtype_maps_cli_values():

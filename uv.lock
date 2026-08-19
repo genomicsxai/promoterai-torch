@@ -1835,9 +1835,10 @@ wheels = [
 
 [[package]]
 name = "promoterai-torch"
-version = "0.1.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
+    { name = "numba" },
     { name = "numpy" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -1861,8 +1862,6 @@ interpret = [
 train = [
     { name = "h5py" },
     { name = "pybigtools" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 wandb = [
     { name = "wandb" },
@@ -1874,8 +1873,6 @@ dev = [
     { name = "h5py" },
     { name = "pybigtools" },
     { name = "pytest" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tangermeme" },
     { name = "twine" },
 ]
@@ -1887,19 +1884,17 @@ test = [
     { name = "h5py" },
     { name = "pybigtools" },
     { name = "pytest" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tangermeme" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "h5py", marker = "extra == 'train'", specifier = ">=3.0" },
+    { name = "numba", specifier = ">=0.58" },
     { name = "numpy", specifier = ">=1.20" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "pybigtools", marker = "extra == 'train'", specifier = ">=0.2.5" },
     { name = "pyfaidx", specifier = ">=0.8" },
-    { name = "scipy", marker = "extra == 'train'", specifier = ">=1.10" },
     { name = "tangermeme", marker = "extra == 'interpret'", specifier = ">=0.5" },
     { name = "tensorflow", marker = "sys_platform == 'darwin' and extra == 'convert'" },
     { name = "tensorflow-cpu", marker = "sys_platform != 'darwin' and extra == 'convert'" },
@@ -1916,7 +1911,6 @@ dev = [
     { name = "h5py", specifier = ">=3.0" },
     { name = "pybigtools", specifier = ">=0.2.5" },
     { name = "pytest", specifier = ">=8" },
-    { name = "scipy", specifier = ">=1.10" },
     { name = "tangermeme", specifier = ">=0.5" },
     { name = "twine", specifier = ">=5.0" },
 ]
@@ -1928,7 +1922,6 @@ test = [
     { name = "h5py", specifier = ">=3.0" },
     { name = "pybigtools", specifier = ">=0.2.5" },
     { name = "pytest", specifier = ">=8" },
-    { name = "scipy", specifier = ">=1.10" },
     { name = "tangermeme", specifier = ">=0.5" },
 ]
 

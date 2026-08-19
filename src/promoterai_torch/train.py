@@ -84,6 +84,24 @@ def load_training_checkpoint(model, optimizer, checkpoint_path: str, device):
     return start_epoch, best_val_loss, ckpt.get("args", {})
 
 
+def resolve_train_steps_per_epoch(dataset_sizes: list, global_batch_size: int) -> int:
+    """Return steps/epoch matching Illumina's train.py: sum(per-species num_batches) / 10.
+
+    Illumina's train.py pre-batches each species' tf.data dataset before
+    counting elements (ds.reduce), so its steps_per_epoch is a batch count,
+    not a raw sample count; dataset_sizes here are raw sample counts, so
+    global_batch_size must divide them out first to land on the same basis.
+    """
+    return int(sum(dataset_sizes) / global_batch_size / 10)
+
+
+def build_train_optimizer(model, learning_rate: float, weight_decay: float):
+    """Build the Keras-compatible AdamW optimizer for training from scratch."""
+    return torch.optim.AdamW(
+        model.parameters(), lr=learning_rate, weight_decay=weight_decay, eps=1e-7
+    )
+
+
 def compute_loss(outputs, y_tuple, w_tuple):
     """Compute per-species weighted MSE loss; skips species whose y has only 1 track (dummy)."""
     loss = torch.tensor(0.0, device=outputs[0].device)
@@ -534,7 +552,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         output_dims.append(y_tuple[j].shape[-1])
 
     dataset_sizes = [len(d) for d in train_datasets]
-    steps_per_epoch = int(sum(dataset_sizes) / 10)
+    steps_per_epoch = resolve_train_steps_per_epoch(dataset_sizes, args.batch_size)
     per_rank_batch_size = resolve_per_rank_batch_size(args.batch_size, world_size)
     train_samples_per_rank = steps_per_epoch * per_rank_batch_size
 
@@ -567,9 +585,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     grad_scaler = torch.amp.GradScaler(
         "cuda", enabled=args.amp_dtype == "fp16" and device.type == "cuda"
     )
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
-    )
+    optimizer = build_train_optimizer(model, args.learning_rate, args.weight_decay)
 
     os.makedirs(args.checkpoint_folder, exist_ok=True)
     logger = CSVLogger(os.path.join(args.checkpoint_folder, "logs.csv"))

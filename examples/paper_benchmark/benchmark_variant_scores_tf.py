@@ -280,7 +280,7 @@ def _score_tf_shard_worker(
                 verbose=verbose,
             )
         queue.put(("ok", result))
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001 - report every worker failure, including SystemExit, through the queue
         queue.put(("error", worker_idx, repr(exc)))
 
 
@@ -407,14 +407,14 @@ def run_tf_benchmarks(
 
     rows = []
     for benchmark_tsv in benchmark_paths(benchmark_dir, datasets):
-        score_kwargs = dict(
-            hg38_finetune_model_folder=hg38_finetune_model_folder,
-            hg38_mm10_finetune_model_folder=hg38_mm10_finetune_model_folder,
-            fasta_file=fasta_file,
-            input_length=input_length,
-            batch_size=batch_size,
-            verbose=verbose,
-        )
+        score_kwargs = {
+            "hg38_finetune_model_folder": hg38_finetune_model_folder,
+            "hg38_mm10_finetune_model_folder": hg38_mm10_finetune_model_folder,
+            "fasta_file": fasta_file,
+            "input_length": input_length,
+            "batch_size": batch_size,
+            "verbose": verbose,
+        }
         if resolved_devices is not None:
             scored = score_benchmark_file_tf_multi_device(
                 benchmark_tsv,

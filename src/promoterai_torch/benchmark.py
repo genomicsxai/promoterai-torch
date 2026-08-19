@@ -5,8 +5,8 @@ import math
 import multiprocessing as mp
 import queue as queue_module
 import urllib.request
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -14,10 +14,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from promoterai_torch.architecture import TwinModel
-from promoterai_torch.dataset import VariantDataset
-from promoterai_torch.score import _collate_variant
-from promoterai_torch.utils import load_pretrained
-
+from promoterai_torch.dataset import VariantDataset, collate_variant
+from promoterai_torch.utils import DEFAULT_INPUT_LENGTH, load_pretrained
 
 BENCHMARK_BASE_URL = (
     "https://raw.githubusercontent.com/Illumina/PromoterAI/master/data/benchmark"
@@ -97,7 +95,7 @@ def score_variants(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        collate_fn=_collate_variant,
+        collate_fn=collate_variant,
     )
 
     all_diffs = []
@@ -201,7 +199,7 @@ def _score_shard_worker(
                 verbose=verbose,
             )
         queue.put(("ok", result))
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001 - report every worker failure, including SystemExit, through the queue
         queue.put(("error", worker_idx, repr(exc)))
 
 
@@ -394,7 +392,7 @@ def run_benchmarks(
     hg38_mm10_finetune_checkpoint: str | Path | None = None,
     fasta_file: str | Path,
     output_dir: str | Path,
-    input_length: int = 20480,
+    input_length: int = DEFAULT_INPUT_LENGTH,
     batch_size: int = 2,
     device: str | None = None,
     devices: list[str] | None = None,
@@ -410,15 +408,15 @@ def run_benchmarks(
     rows: list[dict[str, object]] = []
     resolved_devices = devices if devices is not None else ([device] if device else None)
     for benchmark_tsv in benchmark_paths(benchmark_dir, datasets):
-        score_kwargs = dict(
-            hg38_finetune_checkpoint=hg38_finetune_checkpoint,
-            hg38_mm10_finetune_checkpoint=hg38_mm10_finetune_checkpoint,
-            fasta_file=fasta_file,
-            input_length=input_length,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            verbose=verbose,
-        )
+        score_kwargs = {
+            "hg38_finetune_checkpoint": hg38_finetune_checkpoint,
+            "hg38_mm10_finetune_checkpoint": hg38_mm10_finetune_checkpoint,
+            "fasta_file": fasta_file,
+            "input_length": input_length,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "verbose": verbose,
+        }
         if resolved_devices is not None:
             scored = score_benchmark_file_multi_device(
                 benchmark_tsv,

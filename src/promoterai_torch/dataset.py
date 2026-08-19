@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import random as _random
+
 import numpy as np
 import pandas as pd
 import pyfaidx
@@ -11,41 +14,28 @@ from torch.utils.data import (
     WeightedRandomSampler,
 )
 
-try:
-    from scipy.stats import truncnorm as _truncnorm
+from promoterai_torch.onehot import onehot_encode
 
-    def _truncated_normal(stddev: float) -> float:
-        """Sample from N(0, stddev) clipped to ±2*stddev using scipy for accuracy."""
-        if stddev == 0:
-            return 0.0
-        return float(_truncnorm.rvs(-2, 2, scale=stddev))
-except ImportError:
-    import random as _random
 
-    def _truncated_normal(stddev: float) -> float:
-        """Sample from N(0, stddev) clipped to ±2*stddev via rejection sampling."""
-        if stddev == 0:
-            return 0.0
-        for _ in range(100):
-            v = _random.gauss(0, stddev)
-            if abs(v) <= 2 * stddev:
-                return v
+def _truncated_normal(stddev: float) -> float:
+    """Sample from N(0, stddev) clipped to ±2*stddev via rejection sampling.
+
+    Rejection-sampling a normal until it lands in [-2*stddev, 2*stddev] is the
+    truncated normal distribution by definition, so this is equivalent to
+    scipy.stats.truncnorm(-2, 2, scale=stddev).rvs() without the dependency —
+    the 100-attempt cap is never practically reached (>95% acceptance rate per
+    draw).
+    """
+    if stddev == 0:
         return 0.0
+    for _ in range(100):
+        v = _random.gauss(0, stddev)
+        if abs(v) <= 2 * stddev:
+            return v
+    return 0.0
 
 
-_EMBED = np.zeros((26, 4), dtype="float32")
-_EMBED[ord("A") - 65] = [1, 0, 0, 0]
-_EMBED[ord("C") - 65] = [0, 1, 0, 0]
-_EMBED[ord("G") - 65] = [0, 0, 1, 0]
-_EMBED[ord("T") - 65] = [0, 0, 0, 1]
-
-
-def onehot_encode(seq: str) -> np.ndarray:
-    """One-hot encode a DNA string. Unknown bases → all-zero row. Returns (L, 4) float32."""
-    seq = seq.upper()
-    idx = np.frombuffer(seq.encode(), dtype=np.uint8).astype(np.int32) - 65
-    idx = np.clip(idx, 0, 25)
-    return _EMBED[idx]
+_logger = logging.getLogger(__name__)
 
 
 def _prepare_sample(
@@ -56,24 +46,26 @@ def _prepare_sample(
     sample_weight: tuple,
     augment: bool,
 ) -> tuple:
-    """Port of tfrecords.py::_prepare_sample. Returns (x_crop, y_tuple, weight_tuple)."""
-    input_crop = x.shape[0] - input_length
-    output_crop = y.shape[0] - output_length
-    shift_range = min(input_crop, output_crop)
-    shift = int(round(_truncated_normal(shift_range // 4 * int(augment))))
-    shift = max(-shift_range // 2, min(shift_range // 2, shift))
+    """Randomly re-center the over-length stored x/y around the model's window,
+    optionally reverse-complementing both. Returns (x_crop, y_tuple, weight_tuple).
+    """
+    input_margin = x.shape[0] - input_length
+    output_margin = y.shape[0] - output_length
+    shift_span = min(input_margin, output_margin)
+    max_shift = shift_span // 2
 
-    strand = -1 if (augment and np.random.uniform() < 0.25) else 1
+    shift = round(_truncated_normal(shift_span // 4 * int(augment)))
+    shift = min(max(shift, -max_shift), max_shift)
 
-    ic2 = input_crop // 2
-    oc2 = output_crop // 2
-    # When shift == ic2 the end index would be 0, which is wrong — use None instead
-    x_end = shift - ic2 if shift != ic2 else None
-    y_end = shift - oc2 if shift != oc2 else None
-    x_crop = x[shift + ic2 : x_end][::strand, ::strand]
-    y_crop = y[shift + oc2 : y_end][::strand]
-    x_crop = np.ascontiguousarray(x_crop)
-    y_crop = np.ascontiguousarray(y_crop)
+    reverse_complement = bool(augment) and np.random.uniform() < 0.25
+    strand = -1 if reverse_complement else 1
+
+    x_start = input_margin // 2 + shift
+    y_start = output_margin // 2 + shift
+    x_crop = np.ascontiguousarray(
+        x[x_start : x_start + input_length][::strand, ::strand]
+    )
+    y_crop = np.ascontiguousarray(y[y_start : y_start + output_length][::strand])
 
     y_tuple = tuple(
         y_crop if sw else np.array([[0.0]], dtype="float32") for sw in sample_weight
@@ -83,7 +75,7 @@ def _prepare_sample(
 
 
 class SequenceDataset(Dataset):
-    """Regulatory-track training dataset backed by preprocessed HDF5 sequence/track chunks."""
+    """Regulatory-track training dataset backed by preprocessed per-chromosome HDF5 files."""
 
     def __init__(
         self,
@@ -94,7 +86,7 @@ class SequenceDataset(Dataset):
         augment: bool = False,
     ):
         """Load sequences from HDF5 files; sample_weight is a per-species boolean tuple."""
-        import h5py  # noqa: PLC0415 — optional train dependency
+        import h5py
 
         self.hdf5_files = hdf5_files
         self.input_length = input_length
@@ -141,7 +133,7 @@ class SequenceDataset(Dataset):
         """Best-effort handle cleanup on garbage collection; ignores errors during interpreter teardown."""
         try:
             self.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - must never raise/log during interpreter teardown
             pass
 
     def __getitem__(self, idx: int):
@@ -162,6 +154,26 @@ class SequenceDataset(Dataset):
         y_t = tuple(torch.from_numpy(np.array(yt, dtype="float32")) for yt in y_tuple)
         w_t = torch.tensor(w_tuple, dtype=torch.float32)
         return x_t, y_t, w_t
+
+
+def _extract_window(
+    fasta: pyfaidx.Fasta, chrom: str, pos: int, window: int, pad: bool
+) -> str:
+    """Return an uppercase window of `window` bases centered on `pos` (0-based).
+
+    Bases past the chromosome edge are dropped by pyfaidx's slice; when `pad` is
+    set, the missing bases are backfilled with 'N' (which one-hot-encodes to an
+    all-zero row) so the result is always exactly `window` long. When `pad` is
+    unset, a shorter-than-`window` string is returned as-is, signaling the
+    caller that this locus fell off the chromosome edge.
+    """
+    half = window // 2
+    lo, hi = pos - half, pos + half
+    seq = str(fasta[chrom][max(lo, 0) : hi]).upper()
+    if not pad or len(seq) >= window:
+        return seq
+    seq = "N" * max(0, -lo) + seq
+    return (seq + "N" * window)[:window]
 
 
 class VariantDataset(Dataset):
@@ -208,66 +220,76 @@ class VariantDataset(Dataset):
         """Return number of variants."""
         return len(self.df)
 
+    def _fallback_label(self, row) -> float:
+        """Return the label a skipped variant reports: 0.0 in 'zeros' mode, else the true label."""
+        if self.boundary == "zeros" or not self.output_col:
+            return 0.0
+        return float(row[self.output_col])
+
     def __getitem__(self, idx: int):
         """Return ((x_ref, x_alt), y) where tensors are (input_length, 4); applies strand flip."""
         row = self.df.iloc[idx]
-        chrom, pos = row["chrom"], int(row["pos"]) - 1  # 0-based
+        chrom = row["chrom"]
+        pos = int(row["pos"]) - 1  # 0-based
         ref_allele = row["ref"].upper()
         alt_allele = row["alt"].upper()
         strand = row.get("strand", 1)
-        half = self.input_length // 2
+        window = self.input_length
+        center = window // 2
 
-        start = pos - half
-        seq_ref_str = str(self.fasta[chrom][max(0, start) : pos + half]).upper()
-        center = half
-
-        def _zero():
-            """Return an all-zero (ref, alt) pair for a variant that can't be extracted cleanly."""
-            x = torch.zeros(self.input_length, 4)
-            y = (
-                0.0
-                if self.boundary == "zeros"
-                else float(row[self.output_col])
-                if self.output_col
-                else 0.0
+        def skip(reason: str):
+            _logger.info(
+                "variant %s:%s %s>%s skipped: %s",
+                chrom,
+                pos,
+                ref_allele,
+                alt_allele,
+                reason,
             )
-            return (x, x), y
+            placeholder = torch.zeros(window, 4)
+            return (placeholder, placeholder), self._fallback_label(row)
 
-        if len(seq_ref_str) < self.input_length:
-            if self.boundary == "zeros":
-                print(f"Skipping {chrom}:{pos} {ref_allele}>{alt_allele} (pos issue)")
-                return _zero()
-            # pad: left-pad with N then right-pad; N encodes as all-zero row
-            left_pad = max(0, -start)
-            seq_ref_str = "N" * left_pad + seq_ref_str
-            seq_ref_str = (seq_ref_str + "N" * self.input_length)[: self.input_length]
-
-        extracted_ref = seq_ref_str[center : center + len(ref_allele)]
-        if extracted_ref != ref_allele:
-            print(f"Skipping {chrom}:{pos} {ref_allele}>{alt_allele} (ref issue)")
-            return _zero()
-
-        if not set(alt_allele).issubset({"A", "C", "G", "T"}):
-            print(f"Skipping {chrom}:{pos} {ref_allele}>{alt_allele} (alt issue)")
-            return _zero()
-
-        # Construct alt sequence
-        seq_alt_str = (
-            seq_ref_str[:center] + alt_allele + seq_ref_str[center + len(ref_allele) :]
+        seq_ref = _extract_window(
+            self.fasta, chrom, pos, window, pad=self.boundary == "pad"
         )
-        # Pad or truncate alt to same length as ref
-        seq_alt_str = seq_alt_str.ljust(len(seq_ref_str), "N")[: len(seq_ref_str)]
+        if len(seq_ref) < window:
+            return skip("too close to a chromosome edge")
 
-        x_ref = onehot_encode(seq_ref_str)
-        x_alt = onehot_encode(seq_alt_str)
+        if seq_ref[center : center + len(ref_allele)] != ref_allele:
+            return skip("reference allele does not match the genome")
 
-        # Strand flip
+        if not set(alt_allele) <= {"A", "C", "G", "T"}:
+            return skip("alt allele contains non-ACGT characters")
+
+        x_ref = onehot_encode(seq_ref)
+
+        if len(alt_allele) == len(ref_allele):
+            # Same-length substitution: edit only the changed positions instead of
+            # re-extracting and re-encoding the whole window.
+            x_alt = x_ref.copy()
+            x_alt[center : center + len(alt_allele)] = onehot_encode(alt_allele)
+        else:
+            # Indel: downstream length shifts, so rebuild the full alt window.
+            seq_alt = (
+                seq_ref[:center] + alt_allele + seq_ref[center + len(ref_allele) :]
+            )
+            seq_alt = seq_alt.ljust(len(seq_ref), "N")[: len(seq_ref)]
+            x_alt = onehot_encode(seq_alt)
+
         if strand in (-1, "-"):
-            x_ref = x_ref[::-1, ::-1].copy()
-            x_alt = x_alt[::-1, ::-1].copy()
+            x_ref = np.ascontiguousarray(x_ref[::-1, ::-1])
+            x_alt = np.ascontiguousarray(x_alt[::-1, ::-1])
 
         y = float(row[self.output_col]) if self.output_col else 0.0
         return (torch.from_numpy(x_ref), torch.from_numpy(x_alt)), y
+
+
+def collate_variant(batch):
+    """Stack ref/alt tensors and labels from a list of VariantDataset items into batched tensors."""
+    x_refs = torch.stack([item[0][0] for item in batch])
+    x_alts = torch.stack([item[0][1] for item in batch])
+    ys = torch.tensor([item[1] for item in batch], dtype=torch.float32)
+    return (x_refs, x_alts), ys
 
 
 def build_weighted_dataloader(
@@ -281,8 +303,8 @@ def build_weighted_dataloader(
     prefetch_factor: int | None = 2,
 ) -> DataLoader:
     """
-    Combine multiple SequenceDatasets with weights proportional to dataset size,
-    matching tf.data.Dataset.sample_from_datasets(datasets, weights=output_size).
+    Combine multiple SequenceDatasets, sampling each dataset with probability
+    proportional to its size (species with more data get sampled more often).
     """
     sizes = [len(d) for d in datasets]
     total = sum(sizes)
@@ -305,8 +327,8 @@ def build_weighted_dataloader(
             **loader_kwargs,
         )
 
-    # Equal per-sample weights produce dataset-level probabilities size_i / total,
-    # matching tf.data.Dataset.sample_from_datasets(..., weights=dataset_sizes).
+    # Equal per-sample weights make each dataset's sampling probability
+    # proportional to its own size (size_i / total across all datasets).
     weights = torch.ones(total, dtype=torch.float64)
     samples_per_rank = num_samples if num_samples is not None else total
     generator = torch.Generator()

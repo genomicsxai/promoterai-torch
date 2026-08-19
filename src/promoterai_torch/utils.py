@@ -3,13 +3,13 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
+from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Callable
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
+from torch import nn
 
 
 def resolve_amp_dtype(amp_dtype: str):
@@ -32,7 +32,7 @@ def autocast_context(device: torch.device, amp_dtype):
 
 def setup_distributed():
     """Initialize torchrun DDP when LOCAL_RANK is set."""
-    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
     if local_rank == -1:
         return 0, 1, torch.device("cuda" if torch.cuda.is_available() else "cpu")
     backend = "nccl" if torch.cuda.is_available() else "gloo"
@@ -87,24 +87,6 @@ def apply_optimizer_schedule(
         pg["lr"] = base_lr * scale
         pg["weight_decay"] = base_wd * scale
     return scale
-
-
-class WeightDecayScheduler:
-    """Mirrors the LR schedule for weight_decay (LambdaLR does not touch it)."""
-
-    def __init__(
-        self, optimizer: torch.optim.Optimizer, base_wd: float, total_epochs: int
-    ):
-        """Store optimizer and build the same scale function used by make_lr_lambda."""
-        self.optimizer = optimizer
-        self.base_wd = base_wd
-        self.scale_fn = make_lr_lambda(total_epochs)
-
-    def step(self, epoch: int):
-        """Scale weight_decay for all param groups by the triangle schedule factor."""
-        scale = self.scale_fn(epoch)
-        for pg in self.optimizer.param_groups:
-            pg["weight_decay"] = self.base_wd * scale
 
 
 def unwrap_model(model: nn.Module) -> nn.Module:
@@ -179,7 +161,7 @@ def export_inference_checkpoint(
 
     checkpoint = torch.load(source, map_location="cpu")
     if not isinstance(checkpoint, dict):
-        raise ValueError("Checkpoint must be a dictionary")
+        raise TypeError("Checkpoint must be a dictionary")
     missing = {"model_state_dict", "args"} - checkpoint.keys()
     if missing:
         raise ValueError(
@@ -222,6 +204,27 @@ def load_pretrained(checkpoint_path: str, map_location: str = "cpu"):
     )
     model.load_state_dict(normalize_model_state_dict(ckpt["model_state_dict"]))
     return model, args
+
+
+# Input length of the published PromoterAI model; used as the last-resort default
+# when neither the CLI nor the checkpoint's metadata specifies one.
+DEFAULT_INPUT_LENGTH = 20480
+
+
+def resolve_input_length(cli_input_length: int | None, checkpoint_args: dict) -> int:
+    """Return the CLI-provided input_length, falling back to checkpoint metadata,
+    then to DEFAULT_INPUT_LENGTH.
+
+    input_length isn't recoverable from weight shapes (the architecture is fully
+    convolutional/pointwise), so it's only available if --input_length was passed
+    at conversion time and stored in the checkpoint's args.
+    """
+    if cli_input_length is not None:
+        return cli_input_length
+    checkpoint_input_length = checkpoint_args.get("input_length")
+    if checkpoint_input_length is not None:
+        return checkpoint_input_length
+    return DEFAULT_INPUT_LENGTH
 
 
 class CSVLogger:
@@ -433,7 +436,7 @@ def convert_tf_weights(
         kp = "meta_former_block" if i == 0 else f"meta_former_block_{i}"
         bp = f"blocks.{i}"
 
-        def _bn(pt_pfx, keras_bn):
+        def _bn(pt_pfx, keras_bn, kp=kp):
             """Copy a Keras BatchNormalization layer's params/stats into new_sd at pt_pfx."""
             new_sd[f"{pt_pfx}.weight"] = torch.from_numpy(w[f"{kp}/{keras_bn}/gamma"])
             new_sd[f"{pt_pfx}.bias"] = torch.from_numpy(w[f"{kp}/{keras_bn}/beta"])

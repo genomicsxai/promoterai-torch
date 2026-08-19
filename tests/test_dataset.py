@@ -1,8 +1,9 @@
 import numpy as np
-import pytest  # noqa
 import pandas as pd
 import pyfaidx
+import pytest
 
+import promoterai_torch.dataset as dataset_module
 from promoterai_torch.dataset import (
     SequenceDataset,
     VariantDataset,
@@ -10,7 +11,6 @@ from promoterai_torch.dataset import (
     build_weighted_dataloader,
     onehot_encode,
 )
-import promoterai_torch.dataset as dataset_module
 
 
 def _require_h5py():
@@ -48,7 +48,7 @@ def test_prepare_sample_no_augment_shape():
     x, y = _make_xy(200, 100)
     target_in, target_out = 100, 50
     sw = (True,)
-    x_crop, y_tuple, w_tuple = _prepare_sample(
+    x_crop, y_tuple, _ = _prepare_sample(
         x, y, target_in, target_out, sw, augment=False
     )
     assert x_crop.shape == (target_in, 4)
@@ -61,7 +61,7 @@ def test_prepare_sample_no_augment_no_strand_flip():
     y = np.random.rand(200, 5).astype("float32")
     sw = (True,)
     for _ in range(20):
-        x_crop, y_tuple, _ = _prepare_sample(x, y, 200, 100, sw, augment=False)
+        x_crop, _, _ = _prepare_sample(x, y, 200, 100, sw, augment=False)
         # First base should still be A (no RC)
         assert x_crop[0, 0] == 1.0, "Strand flip occurred with augment=False"
 

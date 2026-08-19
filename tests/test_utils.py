@@ -1,7 +1,8 @@
-import pytest
-import torch
 import sys
 import types
+
+import pytest
+import torch
 
 from promoterai_torch.utils import (
     apply_optimizer_schedule,

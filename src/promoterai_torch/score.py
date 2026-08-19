@@ -18,21 +18,14 @@ import torch
 from torch.utils.data import DataLoader
 
 from promoterai_torch.architecture import TwinModel
-from promoterai_torch.dataset import VariantDataset
-from promoterai_torch.utils import load_pretrained
+from promoterai_torch.dataset import VariantDataset, collate_variant
+from promoterai_torch.utils import load_pretrained, resolve_input_length
 
 
-def _collate_variant(batch):
-    """Stack ref/alt tensors and labels from a list of VariantDataset items into batched tensors."""
-    x_refs = torch.stack([item[0][0] for item in batch])
-    x_alts = torch.stack([item[0][1] for item in batch])
-    ys = torch.tensor([item[1] for item in batch], dtype=torch.float32)
-    return (x_refs, x_alts), ys
-
-
-def main():
-    """Score variants and write tanh-scaled scores to a TSV alongside the input columns."""
-    parser = argparse.ArgumentParser()
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    """Build (or populate, when composed into the unified CLI) the score parser."""
+    if parser is None:
+        parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_checkpoint",
         required=True,
@@ -49,8 +42,12 @@ def main():
     parser.add_argument(
         "--input_length",
         type=int,
-        required=True,
-        help="Input sequence length in bp (must match the model checkpoint)",
+        default=None,
+        help=(
+            "Input sequence length in bp (must match the model checkpoint); "
+            "falls back to the checkpoint's stored input_length, then 20480 "
+            "(the published PromoterAI model's length), if omitted"
+        ),
     )
     parser.add_argument(
         "--batch_size",
@@ -83,19 +80,26 @@ def main():
     parser.add_argument(
         "--verbose", action="store_true", default=False, help="Show a tqdm progress bar"
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main(args: argparse.Namespace | None = None) -> None:
+    """Score variants (parsing args if not already parsed) and write tanh-scaled scores to a TSV."""
+    if args is None:
+        args = build_parser().parse_args()
 
     if args.device:
         device = torch.device(args.device)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    base_model, _ = load_pretrained(args.model_checkpoint, map_location=str(device))
+    base_model, base_args = load_pretrained(args.model_checkpoint, map_location=str(device))
     twin_model = TwinModel(base_model).to(device)
     twin_model.eval()
     if args.compile:
         twin_model = torch.compile(twin_model)
 
+    args.input_length = resolve_input_length(args.input_length, base_args)
     df_var = pd.read_csv(args.var_file, sep="\t")
     dataset = VariantDataset(df_var, args.fasta_file, args.input_length)
     loader = DataLoader(
@@ -103,7 +107,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        collate_fn=_collate_variant,
+        collate_fn=collate_variant,
     )
 
     all_diffs = []

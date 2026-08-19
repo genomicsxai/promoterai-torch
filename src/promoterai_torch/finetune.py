@@ -17,13 +17,13 @@ import pandas as pd
 import pyfaidx
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler, Sampler
 
 from promoterai_torch.architecture import TwinModel
-from promoterai_torch.dataset import VariantDataset
+from promoterai_torch.dataset import VariantDataset, collate_variant
 from promoterai_torch.utils import (
     CSVLogger,
     add_wandb_args,
@@ -31,22 +31,15 @@ from promoterai_torch.utils import (
     autocast_context,
     finish_wandb,
     init_wandb,
-    log_wandb,
     load_pretrained,
+    log_wandb,
     normalize_model_state_dict,
     resolve_amp_dtype,
+    resolve_input_length,
     resolve_per_rank_batch_size,
     setup_distributed,
     unwrap_model,
 )
-
-
-def _collate_variant(batch):
-    """Stack ref/alt tensors and labels from a list of VariantDataset items into batched tensors."""
-    x_refs = torch.stack([item[0][0] for item in batch])
-    x_alts = torch.stack([item[0][1] for item in batch])
-    ys = torch.tensor([item[1] for item in batch], dtype=torch.float32)
-    return (x_refs, x_alts), ys
 
 
 class DistributedSliceSampler(Sampler):
@@ -191,6 +184,10 @@ def save_finetune_checkpoint(
     """Save an inference-only model or a full resumable finetuning checkpoint."""
     twin_model = unwrap_model(twin_model)
     args_dict = dict(base_args)
+    # base_args (from a `convert`-produced checkpoint without --input_length/
+    # --output_length) may be missing input_length; backfill it from the
+    # finetune CLI's required --input_length so downstream tools can rely on it.
+    args_dict.setdefault("input_length", finetune_args.get("input_length"))
     args_dict.setdefault(
         "output_crop", args_dict.get("input_length", 0) - args_dict.get("output_length", 0)
     )
@@ -290,9 +287,10 @@ def load_finetune_checkpoint(
     return start_epoch, best_val_loss, checkpoint.get("args", {})
 
 
-def main():
-    """Filter GTEx outlier variants, fine-tune TwinModel, save best base model checkpoint."""
-    parser = argparse.ArgumentParser()
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    """Build (or populate, when composed into the unified CLI) the finetune parser."""
+    if parser is None:
+        parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_checkpoint",
         required=True,
@@ -309,8 +307,12 @@ def main():
     parser.add_argument(
         "--input_length",
         type=int,
-        required=True,
-        help="Input sequence length in bp (must match the base checkpoint)",
+        default=None,
+        help=(
+            "Input sequence length in bp (must match the base checkpoint); "
+            "falls back to the checkpoint's stored input_length, then 20480 "
+            "(the published PromoterAI model's length), if omitted"
+        ),
     )
     parser.add_argument(
         "--batch_size",
@@ -366,7 +368,13 @@ def main():
         help="Resume from the finetune output folder's latest_model.pt when present",
     )
     add_wandb_args(parser)
-    args = parser.parse_args()
+    return parser
+
+
+def main(args: argparse.Namespace | None = None) -> None:
+    """Parse args (if not already parsed), filter GTEx outlier variants, fine-tune TwinModel, save best base model checkpoint."""
+    if args is None:
+        args = build_parser().parse_args()
 
     rank, world_size, device = setup_distributed()
     per_rank_batch_size = resolve_per_rank_batch_size(args.batch_size, world_size)
@@ -377,6 +385,7 @@ def main():
         dist.barrier()
 
     base_model, base_args = load_pretrained(args.model_checkpoint, map_location=str(device))
+    args.input_length = resolve_input_length(args.input_length, base_args)
     twin_model = TwinModel(base_model).to(device)
     if args.compile:
         twin_model = torch.compile(twin_model)
@@ -440,7 +449,7 @@ def main():
         shuffle=train_sampler is None,
         sampler=train_sampler,
         num_workers=args.num_workers,
-        collate_fn=_collate_variant,
+        collate_fn=collate_variant,
         drop_last=True,
     )
     loader_valid = DataLoader(
@@ -449,7 +458,7 @@ def main():
         shuffle=False,
         sampler=val_sampler,
         num_workers=args.num_workers,
-        collate_fn=_collate_variant,
+        collate_fn=collate_variant,
         drop_last=True,
     )
 

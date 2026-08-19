@@ -110,7 +110,9 @@ def test_promoter_ai_with_crop():
 def test_shortcut_indices():
     num_blocks, freq = 24, 4
     expected = list(range(24, 0, -4))  # [24, 20, 16, 12, 8, 4]
-    model = PromoterAI(num_blocks=num_blocks, model_dim=32, output_dims=[10])
+    model = PromoterAI(
+        num_blocks=num_blocks, model_dim=32, output_dims=[10], shortcut_layer_freq=freq
+    )
     actual = model.output_heads[0].shortcut_indices
     assert actual == expected, f"got {actual}, expected {expected}"
 

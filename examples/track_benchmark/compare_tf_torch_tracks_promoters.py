@@ -32,9 +32,6 @@ import pandas as pd
 import pyfaidx
 import torch
 import tqdm
-
-from promoterai_torch.dataset import onehot_encode
-from promoterai_torch.utils import load_pretrained
 from track_parity_utils import (
     clear_tf_runtime,
     compare_track_outputs,
@@ -45,6 +42,9 @@ from track_parity_utils import (
     print_results,
     write_results_csv,
 )
+
+from promoterai_torch.dataset import onehot_encode
+from promoterai_torch.utils import load_pretrained
 
 
 @dataclass(frozen=True)

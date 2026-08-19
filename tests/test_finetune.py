@@ -4,7 +4,7 @@ import sys
 import pandas as pd
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from promoterai_torch.architecture import PromoterAI, TwinModel
@@ -148,6 +148,7 @@ def test_unified_finetune_cli_accepts_amp_choices(amp_dtype):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert result.returncode == 0
@@ -171,7 +172,7 @@ def test_unified_finetune_cli_accepts_amp_choices(amp_dtype):
     ],
 )
 def test_finetune_clis_expose_resume_options(command):
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
 
     assert result.returncode == 0
     assert "--resume_checkpoint" in result.stdout

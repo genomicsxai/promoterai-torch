@@ -17,14 +17,14 @@ runs DeepLIFT/SHAP, and produces a two-panel figure:
 import argparse
 import os
 
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pyfaidx
 import torch
-import torch.nn as nn
+from matplotlib import gridspec
 from tangermeme.deep_lift_shap import deep_lift_shap
 from tangermeme.plot import plot_logo
+from torch import nn
 
 from promoterai_torch.dataset import onehot_encode
 from promoterai_torch.utils import load_pretrained

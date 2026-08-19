@@ -22,8 +22,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import tqdm
-
-from promoterai_torch.utils import load_pretrained
 from track_parity_utils import (
     clear_tf_runtime,
     compare_track_outputs,
@@ -34,6 +32,8 @@ from track_parity_utils import (
     print_results,
     write_results_csv,
 )
+
+from promoterai_torch.utils import load_pretrained
 
 
 def random_onehot(n_sequences: int, input_length: int, seed: int) -> np.ndarray:

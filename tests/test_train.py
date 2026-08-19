@@ -1,6 +1,6 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from promoterai_torch.architecture import PromoterAI
@@ -9,8 +9,8 @@ from promoterai_torch.train import (
     compute_loss,
     load_training_checkpoint,
     resolve_amp_dtype,
-    resolve_resume_checkpoint,
     resolve_per_rank_batch_size,
+    resolve_resume_checkpoint,
 )
 from promoterai_torch.utils import save_checkpoint
 

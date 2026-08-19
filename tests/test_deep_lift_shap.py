@@ -9,7 +9,7 @@ import warnings
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 pytest.importorskip("tangermeme", reason="tangermeme not installed")
 

@@ -6,10 +6,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from promoterai_torch.benchmark import auroc, benchmark_aurocs
-from promoterai_torch.benchmark import benchmark_paths
-from promoterai_torch.benchmark import score_benchmark_file
-
+from promoterai_torch.benchmark import (
+    auroc,
+    benchmark_aurocs,
+    benchmark_paths,
+    score_benchmark_file,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 

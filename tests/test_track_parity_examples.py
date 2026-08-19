@@ -5,19 +5,18 @@ from pathlib import Path
 
 import numpy as np
 
-
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
 TRACK_BENCHMARK = EXAMPLES / "track_benchmark"
 sys.path.insert(0, str(TRACK_BENCHMARK))
 
-from compare_tf_torch_tracks_promoters import (  # noqa: E402
+from compare_tf_torch_tracks_promoters import (
     Promoter,
     parse_promoter,
     sequence_for_promoter,
 )
-from compare_tf_torch_tracks_random import random_onehot  # noqa: E402
-from track_parity_utils import (  # noqa: E402
+from compare_tf_torch_tracks_random import random_onehot
+from track_parity_utils import (
     compare_track_outputs,
     normalize_tf_outputs,
 )

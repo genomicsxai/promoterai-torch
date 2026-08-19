@@ -1,11 +1,11 @@
-"""Integrity checks for PromoterAI-torch HDF5 training chunks."""
+"""Integrity checks for PromoterAI-torch HDF5 training files."""
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 HDF5_SUFFIXES = {".h5", ".hdf5", ".hdf"}
 
@@ -90,11 +90,12 @@ def print_summary(results: list[HDF5CheckResult]) -> None:
         print(f"BAD {result.path}: {result.error}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Parse args, check the given HDF5 paths, print a summary, and return a process exit code."""
-    parser = argparse.ArgumentParser(
-        description="Check PromoterAI HDF5 training chunks for corruption."
-    )
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    """Build (or populate, when composed into the unified CLI) the check-hdf5 parser."""
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="Check PromoterAI HDF5 training files for corruption."
+        )
     parser.add_argument("--paths", nargs="+", required=True, help="HDF5 files/folders")
     parser.add_argument(
         "--full-read",
@@ -102,7 +103,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Read every x/y value instead of only first and last rows",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(args: argparse.Namespace | None = None) -> int:
+    """Parse args (if not already parsed), check the given HDF5 paths, print a summary, and return a process exit code."""
+    if args is None:
+        args = build_parser().parse_args()
 
     results, exit_code = check_hdf5_paths(args.paths, full_read=args.full_read)
     if exit_code == 2:

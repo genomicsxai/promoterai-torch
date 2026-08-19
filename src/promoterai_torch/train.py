@@ -15,8 +15,8 @@ from glob import glob
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
@@ -357,9 +357,19 @@ def _shutdown_dataloader(loader) -> None:
         loader._iterator = None
 
 
-def main():
-    """Parse args, build datasets and model, run training loop, save best checkpoint."""
-    parser = argparse.ArgumentParser()
+def _chrom_files(folder: str, chroms: range) -> list[str]:
+    """Return each chromosome's HDF5 path under folder; errors if any is missing."""
+    paths = [os.path.join(folder, f"chr{i}.h5") for i in chroms]
+    missing = [p for p in paths if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError(f"Missing preprocessed chromosome file(s): {missing}")
+    return paths
+
+
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    """Build (or populate, when composed into the unified CLI) the train parser."""
+    if parser is None:
+        parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint_folder",
         required=True,
@@ -380,13 +390,13 @@ def main():
         "--input_length",
         type=int,
         required=True,
-        help="Input sequence length in bp (must match preprocessed HDF5 chunks)",
+        help="Input sequence length in bp (must match preprocessed HDF5 files)",
     )
     parser.add_argument(
         "--output_length",
         type=int,
         required=True,
-        help="Output track length in bp (must match preprocessed HDF5 chunks)",
+        help="Output track length in bp (must match preprocessed HDF5 files)",
     )
     parser.add_argument(
         "--num_blocks", type=int, required=True, help="Number of MetaFormer blocks (model depth)"
@@ -488,7 +498,13 @@ def main():
         "(epoch metrics are always logged when W&B is enabled)",
     )
     add_wandb_args(parser)
-    args = parser.parse_args()
+    return parser
+
+
+def main(args: argparse.Namespace | None = None) -> None:
+    """Parse args (if not already parsed), build datasets and model, run training loop, save best checkpoint."""
+    if args is None:
+        args = build_parser().parse_args()
 
     rank, world_size, device = setup_distributed()
 
@@ -500,9 +516,8 @@ def main():
     for j, folder in enumerate(hdf5_folders):
         sw = tuple(k == j for k in range(num_species))
         if j == 0:
-            train_files = sum([glob(f"{folder}/chr{i}_*") for i in range(1, 21)], [])
-            val_files = sum([glob(f"{folder}/chr{i}_*") for i in range(21, 23)], [])
-            val_dataset_files = val_files
+            train_files = _chrom_files(folder, range(1, 21))
+            val_dataset_files = _chrom_files(folder, range(21, 23))
         else:
             train_files = glob(f"{folder}/chr*")
         train_datasets.append(

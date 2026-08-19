@@ -189,6 +189,28 @@ def test_compute_loss_accepts_uncollated_single_sample_weights():
     assert loss == 0.25 * F.mse_loss(outputs[0], y_tuple[0])
 
 
+def test_run_epoch_clips_each_parameter_independently(monkeypatch):
+    calls = []
+    model = _TwoParameterTrackModel()
+    loader = DataLoader(_TinyTrackDataset(), batch_size=1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    def record_clip(parameters, max_norm):
+        calls.append((list(parameters), max_norm))
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", record_clip)
+
+    _run_epoch(model, loader, optimizer, torch.device("cpu"), max_steps=1)
+
+    # Keras' AdamW(clipnorm=...) (used by Illumina's from-scratch training)
+    # clips each variable's gradient norm independently rather than clipping
+    # the norm across all parameters jointly, so each parameter must get its
+    # own clip_grad_norm_ call.
+    assert len(calls) == 2
+    assert all(len(parameters) == 1 for parameters, _ in calls)
+    assert all(max_norm == 1e-4 for _, max_norm in calls)
+
+
 def test_run_epoch_supports_progress_and_batch_logging(capsys):
     model = _TinyTrackModel()
     loader = DataLoader(_TinyTrackDataset(), batch_size=1)
@@ -276,6 +298,18 @@ class _TinyTrackModel(nn.Module):
 
     def forward(self, x):
         out = self.scale * torch.ones(x.shape[0], x.shape[1], 2, device=x.device)
+        return (out,)
+
+
+class _TwoParameterTrackModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.bias = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, x):
+        ones = torch.ones(x.shape[0], x.shape[1], 2, device=x.device)
+        out = self.scale * ones + self.bias * ones
         return (out,)
 
 

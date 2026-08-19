@@ -6,6 +6,7 @@ import torch
 
 from promoterai_torch.utils import (
     apply_optimizer_schedule,
+    clip_grad_norm_per_parameter,
     export_inference_checkpoint,
     finish_wandb,
     init_wandb,
@@ -71,6 +72,30 @@ def test_apply_optimizer_schedule_updates_lr_and_weight_decay_at_epoch_begin():
     assert scale == pytest.approx(0.1)
     assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(5e-7)
+
+
+def test_clip_grad_norm_per_parameter_clips_each_parameter_to_its_own_norm():
+    small = torch.nn.Parameter(torch.zeros(3))
+    small.grad = torch.tensor([0.001, 0.0, 0.0])  # norm 0.001, already under max_norm
+    large = torch.nn.Parameter(torch.zeros(3))
+    large.grad = torch.tensor([3.0, 4.0, 0.0])  # norm 5.0, must be clipped
+
+    clip_grad_norm_per_parameter([small, large], max_norm=1.0)
+
+    assert torch.allclose(small.grad, torch.tensor([0.001, 0.0, 0.0]))
+    assert torch.allclose(large.grad.norm(), torch.tensor(1.0))
+    # Each parameter is clipped to its OWN norm, unlike clipping the full
+    # parameter list in one nn.utils.clip_grad_norm_ call, which would clip
+    # the joint norm across both parameters instead.
+
+
+def test_clip_grad_norm_per_parameter_skips_parameters_without_gradients():
+    no_grad = torch.nn.Parameter(torch.zeros(3))
+    no_grad.grad = None
+
+    clip_grad_norm_per_parameter([no_grad], max_norm=1.0)  # must not raise
+
+    assert no_grad.grad is None
 
 
 def test_unwrap_model_handles_torch_compile_wrappers():

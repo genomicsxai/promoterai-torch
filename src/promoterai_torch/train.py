@@ -27,6 +27,7 @@ from promoterai_torch.utils import (
     add_wandb_args,
     apply_optimizer_schedule,
     autocast_context,
+    clip_grad_norm_per_parameter,
     finish_wandb,
     init_wandb,
     log_wandb,
@@ -269,12 +270,12 @@ def _run_epoch(
                 if grad_scaler is not None and grad_scaler.is_enabled():
                     grad_scaler.scale(loss).backward()
                     grad_scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-4)
+                    clip_grad_norm_per_parameter(model.parameters(), max_norm=1e-4)
                     grad_scaler.step(optimizer)
                     grad_scaler.update()
                 else:
                     loss.backward()
-                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-4)
+                    clip_grad_norm_per_parameter(model.parameters(), max_norm=1e-4)
                     optimizer.step()
                 _sync_for_timing(device, in_profile_window)
                 backward_end = time.perf_counter()

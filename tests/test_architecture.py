@@ -51,6 +51,30 @@ def test_metaformer_block_shape():
     assert out.shape == (B, L, C)
 
 
+def test_metaformer_block_batchnorm_matches_keras_defaults():
+    # Illumina's architecture.py uses tkl.BatchNormalization(synchronized=True)
+    # with no explicit eps/momentum, i.e. Keras' defaults: eps=1e-3, momentum=0.99.
+    # PyTorch's momentum is the weight on the new batch stat (opposite convention
+    # from Keras, which weights the old running average), so the equivalent
+    # PyTorch momentum is 1 - 0.99 = 0.01 — not PyTorch's own default of 0.1.
+    block = MetaFormerBlock(model_dim=4, kernel_size=3, dilation_rate=1)
+    for bn in (block.bn1, block.bn2):
+        assert bn.eps == 1e-3
+        assert bn.momentum == 0.01
+
+
+def test_batchnorm_running_stats_update_at_keras_rate():
+    bn = torch.nn.BatchNorm1d(4, eps=1e-3, momentum=0.01)
+    bn.train()
+    x = torch.randn(8, 4, 16) * 3 + 5  # (B, C, L), batch mean far from the zero init
+    with torch.no_grad():
+        bn(x)
+    batch_mean = x.mean(dim=(0, 2))
+    # running = (1 - momentum) * running_old + momentum * batch; running_old == 0.
+    expected = 0.01 * batch_mean
+    assert torch.allclose(bn.running_mean, expected, atol=1e-5)
+
+
 def test_metaformer_residual():
     block = MetaFormerBlock(32, 5, 1)
     block.eval()

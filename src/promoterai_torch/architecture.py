@@ -13,7 +13,11 @@ class MetaFormerBlock(nn.Module):
     def __init__(self, model_dim: int, kernel_size: int, dilation_rate: int):
         """Pre-norm MetaFormer block: depthwise-conv token mixer + FFN channel mixer."""
         super().__init__()
-        self.bn1 = nn.BatchNorm1d(model_dim, eps=1e-3)
+        # eps=1e-3 matches Keras BatchNormalization's default epsilon (1e-3).
+        # momentum=0.01 matches Keras' default momentum=0.99: PyTorch's momentum
+        # is the weight on the new batch statistic, Keras' is the weight on the
+        # old running average, so they're complementary (0.01 = 1 - 0.99).
+        self.bn1 = nn.BatchNorm1d(model_dim, eps=1e-3, momentum=0.01)
         self.dw_conv = nn.Conv1d(
             model_dim,
             model_dim,
@@ -22,7 +26,7 @@ class MetaFormerBlock(nn.Module):
             padding="same",
             groups=model_dim,
         )
-        self.bn2 = nn.BatchNorm1d(model_dim, eps=1e-3)
+        self.bn2 = nn.BatchNorm1d(model_dim, eps=1e-3, momentum=0.01)
         self.ffn1 = nn.Linear(model_dim, model_dim * 4)
         self.act = nn.ReLU()
         self.ffn2 = nn.Linear(model_dim * 4, model_dim)

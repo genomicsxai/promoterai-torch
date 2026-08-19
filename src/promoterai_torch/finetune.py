@@ -18,7 +18,6 @@ import pyfaidx
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler, Sampler
 
@@ -29,6 +28,7 @@ from promoterai_torch.utils import (
     add_wandb_args,
     apply_optimizer_schedule,
     autocast_context,
+    clip_grad_norm_per_parameter,
     finish_wandb,
     init_wandb,
     load_pretrained,
@@ -77,13 +77,6 @@ def resolve_finetune_epoch_sizes(
             f"got {val_size} variants with --batch_size {global_batch_size}"
         )
     return steps_per_epoch, complete_val_samples
-
-
-def _clip_grad_norm_per_parameter(parameters, max_norm: float) -> None:
-    """Match Keras AdamW(clipnorm=...) by clipping each variable independently."""
-    for parameter in parameters:
-        if parameter.grad is not None:
-            nn.utils.clip_grad_norm_([parameter], max_norm=max_norm)
 
 
 def build_finetune_optimizer(twin_model, learning_rate: float, weight_decay: float):
@@ -140,14 +133,14 @@ def _run_epoch(
                 if grad_scaler is not None and grad_scaler.is_enabled():
                     grad_scaler.scale(loss).backward()
                     grad_scaler.unscale_(optimizer)
-                    _clip_grad_norm_per_parameter(
+                    clip_grad_norm_per_parameter(
                         twin_model.parameters(), max_norm=1.0
                     )
                     grad_scaler.step(optimizer)
                     grad_scaler.update()
                 else:
                     loss.backward()
-                    _clip_grad_norm_per_parameter(
+                    clip_grad_norm_per_parameter(
                         twin_model.parameters(), max_norm=1.0
                     )
                     optimizer.step()

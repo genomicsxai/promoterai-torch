@@ -30,6 +30,19 @@ def autocast_context(device: torch.device, amp_dtype):
     return torch.autocast(device_type=device.type, dtype=amp_dtype)
 
 
+def clip_grad_norm_per_parameter(parameters, max_norm: float) -> None:
+    """Match Keras optimizers' clipnorm by clipping each variable independently.
+
+    Keras' `clipnorm` (unlike `global_clipnorm`) clips each variable's gradient
+    to its own max norm rather than clipping the norm across all parameters
+    jointly, which is what `torch.nn.utils.clip_grad_norm_` does when passed
+    the full parameter list in one call.
+    """
+    for parameter in parameters:
+        if parameter.grad is not None:
+            nn.utils.clip_grad_norm_([parameter], max_norm=max_norm)
+
+
 def setup_distributed():
     """Initialize torchrun DDP when LOCAL_RANK is set."""
     local_rank = int(os.environ.get("LOCAL_RANK", "-1"))

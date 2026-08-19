@@ -15,7 +15,7 @@ uv add promoterai-torch --extra train --extra wandb
 
 ## Data preprocessing
 
-We follow the original PromoterAI's repo and preprocess track and sequence data into chunks for training. This needs to be done separately for each chromosome, e.g.
+Preprocess track and sequence data into one HDF5 file per chromosome for training. This needs to be done separately for each chromosome, e.g.
 
 ```sh
 promoterai-torch preprocess \
@@ -26,7 +26,7 @@ promoterai-torch preprocess \
 
 Once done, you can then train on this dataset.
 
-Check the generated chunks before launching a long run:
+Check the generated per-chromosome HDF5 files before launching a long run:
 
 ```sh
 promoterai-torch check-hdf5 \

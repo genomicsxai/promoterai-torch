@@ -1,9 +1,12 @@
 """
-Preprocess TSS annotations + genome FASTA + BigWig tracks into HDF5 files.
+Preprocess TSS annotations + genome FASTA + BigWig tracks into one HDF5 file per
+chromosome for the PyTorch training pipeline. The BigWig TSV must contain `fwd`,
+`rev`, and `xform` columns: paths to the forward- and reverse-strand BigWig files
+for a track, and a Python expression (e.g. "np.arcsinh") applied to its values.
 
-This mirrors the original PromoterAI TFRecord preprocessing semantics, but writes
-HDF5 files for the PyTorch training pipeline. The BigWig TSV must contain
-`fwd`, `rev`, and `xform` columns.
+Samples are written incrementally in --chunk_size batches into a single growable
+HDF5 file per chromosome (rather than one small file per batch), bounding peak
+memory use without producing a large number of small files per chromosome.
 
 Usage:
     python -m promoterai_torch.preprocess \
@@ -12,15 +15,20 @@ Usage:
         --chrom chr1 --input_length 32768 --output_length 16384 --chunk_size 256
 """
 
+from __future__ import annotations
+
 import argparse
 import os
+from typing import TYPE_CHECKING
 
-import h5py
 import numpy as np
 import pandas as pd
 import pyfaidx
 
-from promoterai_torch.dataset import onehot_encode
+from promoterai_torch.onehot import onehot_encode
+
+if TYPE_CHECKING:
+    import h5py
 
 _pybigtools_import_error = None
 try:
@@ -38,25 +46,35 @@ def _extract_bigwig(bw, chrom, start, end):
             return np.zeros(end - start, dtype="float32")
         vals = np.array(vals, dtype="float32")
         return vals
-    except Exception:
+    except Exception:  # noqa: BLE001 - any pybigtools read failure should fall back to zeros
         return np.zeros(end - start, dtype="float32")
 
 
 def _compile_xform(expr: str):
-    """Compile a BigWig transform expression from the original PromoterAI TSV."""
-    return eval(expr, {"np": np, "__builtins__": {}})  # noqa: S307 - original API is expressions
+    """Compile a per-track BigWig value transform expression (e.g. "np.arcsinh") from the bigwig TSV."""
+    return eval(expr, {"np": np, "__builtins__": {}})
 
 
-def make_hdf5_file(hdf5_file: str, xs: np.ndarray, ys: np.ndarray):
-    """Write x and y arrays to an HDF5 file with gzip compression level 4."""
-    os.makedirs(os.path.dirname(hdf5_file) or ".", exist_ok=True)
-    with h5py.File(hdf5_file, "w") as f:
-        f.create_dataset(
-            "x", data=xs.astype("float32"), compression="gzip", compression_opts=4
-        )
-        f.create_dataset(
-            "y", data=ys.astype("float32"), compression="gzip", compression_opts=4
-        )
+def _create_growable_dataset(
+    f: h5py.File, name: str, sample_shape: tuple, chunk_rows: int
+) -> h5py.Dataset:
+    """Create a resizable, gzip-compressed dataset that starts empty and grows by row."""
+    return f.create_dataset(
+        name,
+        shape=(0, *sample_shape),
+        maxshape=(None, *sample_shape),
+        dtype="float32",
+        chunks=(chunk_rows, *sample_shape),
+        compression="gzip",
+        compression_opts=4,
+    )
+
+
+def _append_rows(dataset: h5py.Dataset, rows: np.ndarray) -> None:
+    """Grow dataset by len(rows) and write them into the newly added slice."""
+    start = dataset.shape[0]
+    dataset.resize(start + len(rows), axis=0)
+    dataset[start:] = rows
 
 
 def preprocess_chrom(
@@ -69,7 +87,9 @@ def preprocess_chrom(
     output_length: int,
     chunk_size: int,
 ):
-    """Extract sequences and BigWig tracks for all TSS on chrom and write chunked HDF5 files."""
+    """Extract sequences and BigWig tracks for all TSS on chrom and write one HDF5 file."""
+    import h5py  # optional train dependency, kept out of module-level imports
+
     df_tss = pd.read_csv(tss_file, sep="\t")
     df_tss = df_tss[df_tss["chrom"] == chrom].reset_index(drop=True)
     if df_tss.empty:
@@ -98,20 +118,29 @@ def preprocess_chrom(
     half_in = input_length // 2
     half_out = output_length // 2
 
+    os.makedirs(hdf5_folder, exist_ok=True)
+    hdf5_path = os.path.join(hdf5_folder, f"{chrom}.h5")
+    h5_file: h5py.File | None = None
+    x_ds = y_ds = None
     xs_buf, ys_buf = [], []
-    chunk_idx = 0
+    total_rows = 0
 
     def flush(force=False):
-        """Write buffered samples to disk when chunk_size is reached or force=True."""
-        nonlocal xs_buf, ys_buf, chunk_idx
-        if not xs_buf:
+        """Append buffered samples to the chromosome's HDF5 file, creating it on first flush."""
+        nonlocal xs_buf, ys_buf, h5_file, x_ds, y_ds, total_rows
+        if not xs_buf or (not force and len(xs_buf) < chunk_size):
             return
-        if force or len(xs_buf) >= chunk_size:
-            path = os.path.join(hdf5_folder, f"{chrom}_{chunk_idx}.h5")
-            make_hdf5_file(path, np.stack(xs_buf), np.stack(ys_buf))
-            print(f"Wrote {len(xs_buf)} samples to {path}")
-            xs_buf, ys_buf = [], []
-            chunk_idx += 1
+        xs = np.stack(xs_buf).astype("float32")
+        ys = np.stack(ys_buf).astype("float32")
+        if h5_file is None:
+            h5_file = h5py.File(hdf5_path, "w")
+            x_ds = _create_growable_dataset(h5_file, "x", xs.shape[1:], chunk_size)
+            y_ds = _create_growable_dataset(h5_file, "y", ys.shape[1:], chunk_size)
+        _append_rows(x_ds, xs)
+        _append_rows(y_ds, ys)
+        total_rows += len(xs_buf)
+        print(f"Wrote {len(xs_buf)} samples ({total_rows} total) to {hdf5_path}")
+        xs_buf, ys_buf = [], []
 
     for _, row in df_tss.iterrows():
         pos = int(row["pos"]) - 1  # 0-based
@@ -145,17 +174,24 @@ def preprocess_chrom(
             flush()
 
     flush(force=True)
+    if h5_file is not None:
+        h5_file.close()
 
     for bw in bws_fwd + bws_rev:
         bw.close()
-    print(f"Preprocessing complete for {chrom}: {chunk_idx} HDF5 files written.")
+
+    if total_rows:
+        print(f"Preprocessing complete for {chrom}: {total_rows} samples written to {hdf5_path}.")
+    else:
+        print(f"Preprocessing complete for {chrom}: no samples passed filtering, no file written.")
 
 
-def main():
-    """Parse args and run preprocess_chrom for the specified chromosome."""
-    parser = argparse.ArgumentParser()
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    """Build (or populate, when composed into the unified CLI) the preprocess parser."""
+    if parser is None:
+        parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--hdf5_folder", required=True, help="Output folder for preprocessed HDF5 chunks"
+        "--hdf5_folder", required=True, help="Output folder for per-chromosome HDF5 files"
     )
     parser.add_argument(
         "--tss_file",
@@ -181,9 +217,16 @@ def main():
         "--chunk_size",
         type=int,
         default=256,
-        help="Number of samples per output HDF5 file (default: %(default)s)",
+        help="Number of samples buffered in memory before each incremental write "
+        "to the chromosome's HDF5 file (default: %(default)s)",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main(args: argparse.Namespace | None = None) -> None:
+    """Parse args (if not already parsed) and run preprocess_chrom for the specified chromosome."""
+    if args is None:
+        args = build_parser().parse_args()
 
     os.makedirs(args.hdf5_folder, exist_ok=True)
     preprocess_chrom(

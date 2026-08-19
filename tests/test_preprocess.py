@@ -1,7 +1,8 @@
+import types
+
 import numpy as np
 import pandas as pd
 import pytest
-import types
 
 h5py = pytest.importorskip("h5py")
 
@@ -57,7 +58,7 @@ def test_preprocess_uses_stranded_bigwigs_xforms_and_reverses_minus(tmp_path, mo
         chunk_size=8,
     )
 
-    with h5py.File(out_dir / "chr1_0.h5", "r") as handle:
+    with h5py.File(out_dir / "chr1.h5", "r") as handle:
         x = handle["x"][:]
         y = handle["y"][:]
 

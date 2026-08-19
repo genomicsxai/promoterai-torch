@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "promoterai-torch"
-version = "0.2.0"
+version = "0.2.1"
 description = "PyTorch port of PromoterAI for promoter variant scoring."
 authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
 license = "MIT"

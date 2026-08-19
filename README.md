@@ -7,7 +7,7 @@ A PyTorch port of [PromoterAI](https://github.com/Illumina/PromoterAI) v1 from I
 > [!Important]
 > This is **not** an official Illumina product or publication. The contents of this package are solely the responsibility of the authors/maintainers and its release should not be construed as being supported/endorsed by Illumina or the original authors of PromoterAI.
 >
-> The official PromoterAI codebase, models, and variant scores are released under fairly restrictive licensing (see [their github](https://github.com/Illumina/PromoterAI) for instructions on academic/commercial licensing). Please do not redistribute converted checkpoints.
+> The official PromoterAI codebase is released under the [PolyForm Strict License 1.0.0](https://polyformproject.org/licenses/strict/1.0.0/). The pretrained models and precomputed variant scores are released separately under Illumina's own academic-only-use data license (see [their github](https://github.com/Illumina/PromoterAI) for instructions on academic/commercial licensing). This package is MIT-licensed and contains no Illumina code, models, or scores, but if you convert and use the original PromoterAI weights, you — not this project — are responsible for complying with Illumina's license terms. Please do not redistribute converted checkpoints.
 
 ## Install
 
@@ -126,7 +126,7 @@ Install the optional interpretation dependencies first:
 
 ```sh
 pip install "promoterai-torch[interpret]"
-# or 
+# or
 uv add promoterai-torch --extra interpret
 ```
 

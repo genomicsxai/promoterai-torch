@@ -34,3 +34,18 @@ python -m pytest tests/ -v
 
 Run the test suite before opening a PR, and keep changes scoped to a single
 concern where possible.
+
+If your change touches the model architecture, training loop, optimizer
+setup, or the Keras/PyTorch weight converter, also run the cross-framework
+equivalence tests locally before merging:
+
+```sh
+uv sync --group dev --extra convert
+uv run pytest tests/test_convert.py tests/test_tf_gradient_equivalence.py -v
+```
+
+These require `tensorflow`/`tf-keras` (the `convert` extra) and are skipped
+by default in per-PR CI, so they won't catch a regression there. The
+`tf-equivalence.yml` workflow runs them weekly as a final failsafe against TF
+or PyTorch API drift — not a substitute for running them yourself when your
+PR touches equivalence-sensitive code.

@@ -105,6 +105,15 @@ Full predicted regulatory tracks are validated by `examples/compare_tf_torch_tra
 
 When changing parity examples, add or update tests in `tests/test_track_parity_examples.py`. These tests avoid the licensed SavedModels but cover dict-output normalization, per-head error calculation, random sequence generation, promoter sequence extraction, and CLI help smoke checks.
 
+`tests/test_tf_gradient_equivalence.py` runs one real cross-framework training step (Keras and PyTorch, identical converted weights and batch) and compares loss, raw/post-clip gradients, AdamW parameter deltas, and BatchNorm running stats — it does not need the licensed SavedModels. Along with `tests/test_convert.py`, it requires the `convert` extra (`tensorflow`/`tf-keras`) and is skipped by default, including in per-PR CI. Run both locally before merging any change to `architecture.py`, `train.py`, `finetune.py`, or the weight converter in `utils.py`:
+
+```sh
+uv sync --group dev --extra convert
+uv run pytest tests/test_convert.py tests/test_tf_gradient_equivalence.py -v
+```
+
+A weekly scheduled workflow (`tf-equivalence.yml`) also runs these, but only as a final failsafe against TF/PyTorch API drift on `main` — it is not a pre-merge gate, so don't rely on it to catch a regression in your own PR.
+
 ## Key Data Details
 
 - **hg38 output tracks**: 498 (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq)

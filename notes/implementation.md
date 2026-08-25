@@ -44,6 +44,37 @@ class PromoterAIWrapper(nn.Module):
 
 Downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints).
 
+## AdamW epsilon convention differs between Keras and PyTorch
+
+`keras.optimizers.AdamW.update_step` (`tf_keras/src/optimizers/adamw.py`) computes, using the
+*biased* (pre-bias-correction) moments `m`, `v`:
+
+```python
+alpha_t = lr * sqrt(1 - beta_2 ** t) / (1 - beta_1 ** t)
+update = alpha_t * m / (sqrt(v) + epsilon)
+```
+
+`torch.optim.AdamW` (and the textbook Adam formulation) bias-corrects `m`/`v` first instead:
+
+```python
+m_hat, v_hat = m / (1 - beta_1 ** t), v / (1 - beta_2 ** t)
+update = lr * m_hat / (sqrt(v_hat) + epsilon)
+```
+
+These are only mathematically equivalent if `epsilon` is rescaled by `sqrt(1 - beta_2 ** t)` —
+which is exactly what `keras.optimizers.Adam`'s `adaptive_epsilon` option does, but `AdamW` has
+no such option and always uses the raw `epsilon` value as-is. With a shared `epsilon=1e-7`
+(matching Keras' default, per `build_train_optimizer`/`build_finetune_optimizer`), Keras' step-1
+update is damped by up to ~32x more than PyTorch's (`1 / sqrt(1 - 0.999**1)`), converging to
+<1% difference by step ~1000 as `beta_2 ** t -> 0`.
+
+This is a framework-inherent AdamW quirk, not a porting bug — PyTorch's built-in `AdamW` has no
+option to replicate Keras' non-adaptive epsilon placement, and the effect is confined to roughly
+the first ~1,000 optimizer steps of a training run (real training runs for far longer), so it
+isn't worth a custom optimizer to chase. Confirmed in `tests/test_tf_gradient_equivalence.py`,
+which shows the two frameworks' AdamW *mechanics* (bias correction, decoupled weight decay)
+match exactly once epsilon is isolated out (`epsilon -> 0` on both sides).
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

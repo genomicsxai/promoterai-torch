@@ -88,7 +88,7 @@ Published hyperparameters: `num_blocks=24`, `model_dim=1024`, `input_length=2048
 
 ## Training Details
 
-- Optimizer: `AdamW`; gradient clip `max_norm=1e-4` (fine-tuning: `1.0`)
+- Optimizer: `AdamW`; gradient clip `max_norm=1e-4` (fine-tuning: `1.0`). Keras' `AdamW` hardcodes a non-adaptive epsilon placement that PyTorch's doesn't replicate, causing a transient (first ~1,000 steps) update-magnitude difference even with matching `epsilon=1e-7` — see "AdamW epsilon convention differs between Keras and PyTorch" in `notes/implementation.md`
 - LR schedule (`make_lr_lambda`): linear warmup 0→10% epochs, constant 10→90%, linear decay 90→100%
 - Weight decay scaled by same factor via `WeightDecayScheduler` (LambdaLR does not touch WD)
 - Steps per epoch: `int(sum(dataset_sizes) / 10)`; fine-tuning: 20% of data per epoch

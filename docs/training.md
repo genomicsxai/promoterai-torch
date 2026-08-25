@@ -3,6 +3,17 @@
 > [!Warning]
 > I have verified that this code executes and can train/finetune models. I have also endeavored to make sure that it aligns with the training/finetuning behavior of the official PromoterAI repo. However, I have not attempted to reproduce their models, and cannot ensure there isn't some hidden divergence in some low-level PyTorch vs Tensorflow/Keras behavior.
 
+One such known divergence: Keras' `AdamW` optimizer places its `epsilon` term
+differently than PyTorch's does, so even with a matching `epsilon=1e-7`, the
+two frameworks' optimizer updates differ meaningfully for roughly the first
+~1,000 steps of a training or fine-tuning run (up to ~30x more damping on step
+1), converging to under 1% difference after that. This is a characterized
+difference between the two frameworks' `AdamW` implementations, not a bug in
+this port, and isn't expected to meaningfully affect final model quality for
+runs of realistic length. See `notes/implementation.md` for the full
+derivation and `tests/test_tf_gradient_equivalence.py` for the cross-framework
+verification.
+
 Fine-tuning or training from scratch using the built-in scripts requires the
 `train` extra described in [Install](../README.md#install).
 

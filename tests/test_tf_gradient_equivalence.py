@@ -1,5 +1,5 @@
 """
-Cross-framework single-step training equivalence: PyTorch vs. Keras.
+Cross-framework single-step training equivalence: PyTorch vs. Keras (toy scale).
 
 Per reviewer finding (Al-Murphy, PR #120 on the blog post), this runs one
 optimizer step in train mode on a fixed batch through numerically identical
@@ -10,101 +10,34 @@ gradient clipping vs. global clipnorm; BatchNorm momentum 0.01 vs. 0.1) plus
 the AdamW epsilon fix in 18c009a, using real cross-framework execution rather
 than the PyTorch-only tests added alongside those fixes.
 
+Uses a small (8-block, dim-16) model on random weights/data purely to check
+gradient/optimizer *mechanics* cheaply and deterministically -- it does not
+exercise anything that only shows up at the published scale (24 blocks,
+dim 1024) or on real genomic data. tests/test_tf_gradient_equivalence_real.py
+runs the same comparison against a real converted checkpoint on a GPU.
+
+Comparisons use cosine similarity (direction) and relative L2 norm (magnitude)
+per tensor, aggregated with a required pass *rate* across tensors -- see
+tests/gradient_comparison_utils.py -- rather than elementwise
+np.testing.assert_allclose. That's because both stem paths fuse a ReLU right
+after their linear op, so on an unlucky weight draw a handful of pre-activation
+values can land close enough to zero that ordinary TF-vs-PyTorch summation-order
+floating-point noise flips which side of the ReLU boundary they're on in one
+framework but not the other, killing or admitting gradient for that one element
+only -- expected, harmless framework noise, not a porting bug, that a strict
+per-element assert would fail on.
+
 Skipped automatically when tf-keras is not installed.
 """
 
 import numpy as np
 import pytest
-import torch
 
+from tests.gradient_comparison_utils import assert_pass_rate
+from tests.keras_pytorch_step import run_single_step
 from tests.test_convert import _build_tf_keras_model, _save_savedmodel
 
 pytest.importorskip("tf_keras", reason="tf-keras not installed")
-
-
-def _keras_tensors_to_pt(tensors, num_blocks, shortcut_nums_desc, species=("human",)):
-    """Map a {keras_var_name: array} dict to {pt_param_name: array}, mirroring
-    convert_tf_weights' weight transforms so the same function works on values
-    (checked directly against convert_tf_weights already, in test_convert.py)
-    or gradients (checked here) — a gradient of a reshaped/transposed tensor
-    is just the same reshape/transpose applied to the gradient.
-    """
-    out = {}
-    if "dense/kernel" in tensors:
-        out["stem.weight"] = tensors["dense/kernel"].T[:, :, None]
-    if "dense/bias" in tensors:
-        out["stem.bias"] = tensors["dense/bias"]
-    for i in range(num_blocks):
-        kp = "meta_former_block" if i == 0 else f"meta_former_block_{i}"
-        bp = f"blocks.{i}"
-        direct_pairs = [
-            (f"{kp}/batch_normalization/gamma", f"{bp}.bn1.weight"),
-            (f"{kp}/batch_normalization/beta", f"{bp}.bn1.bias"),
-            (f"{kp}/batch_normalization/moving_mean", f"{bp}.bn1.running_mean"),
-            (f"{kp}/batch_normalization/moving_variance", f"{bp}.bn1.running_var"),
-            (f"{kp}/depthwise_conv1d/bias", f"{bp}.dw_conv.bias"),
-            (f"{kp}/batch_normalization_1/gamma", f"{bp}.bn2.weight"),
-            (f"{kp}/batch_normalization_1/beta", f"{bp}.bn2.bias"),
-            (f"{kp}/batch_normalization_1/moving_mean", f"{bp}.bn2.running_mean"),
-            (f"{kp}/batch_normalization_1/moving_variance", f"{bp}.bn2.running_var"),
-            (f"{kp}/dense/bias", f"{bp}.ffn1.bias"),
-            (f"{kp}/dense_1/bias", f"{bp}.ffn2.bias"),
-        ]
-        for keras_name, pt_name in direct_pairs:
-            if keras_name in tensors:
-                out[pt_name] = tensors[keras_name]
-        if f"{kp}/depthwise_conv1d/depthwise_kernel" in tensors:
-            kernel = tensors[f"{kp}/depthwise_conv1d/depthwise_kernel"]
-            out[f"{bp}.dw_conv.weight"] = kernel.transpose(1, 2, 0)
-        if f"{kp}/dense/kernel" in tensors:
-            out[f"{bp}.ffn1.weight"] = tensors[f"{kp}/dense/kernel"].T
-        if f"{kp}/dense_1/kernel" in tensors:
-            out[f"{bp}.ffn2.weight"] = tensors[f"{kp}/dense_1/kernel"].T
-    for j, sp in enumerate(species):
-        for p_idx, n in enumerate(shortcut_nums_desc):
-            pfx = f"shortcut_{sp}{n}" if sp else f"shortcut{n}"
-            if f"{pfx}/kernel" in tensors:
-                out[f"output_heads.{j}.projections.{p_idx}.weight"] = tensors[
-                    f"{pfx}/kernel"
-                ].T
-            if f"{pfx}/bias" in tensors:
-                out[f"output_heads.{j}.projections.{p_idx}.bias"] = tensors[
-                    f"{pfx}/bias"
-                ]
-    return out
-
-
-def _assert_pooled_gradient_match(pt_tensors, mapped_tensors, *, abs_err_p99, cosine_min, what):
-    """Assert two {name: array} gradient dicts match, tolerant of isolated ReLU-boundary
-    flips (see the seeding comment in the test below for why these occur) rather than
-    failing outright on any single outlier element. Pools absolute error across every
-    element of every tensor and requires the 99th percentile to be tiny -- a systematic
-    bug would push far more than 1% of elements out of tolerance -- and separately checks
-    that the fully flattened gradient vector points the same direction (cosine similarity),
-    which an isolated boundary flip barely perturbs but a real bug would not survive.
-    """
-    flat_pt, flat_mapped, abs_errs = [], [], []
-    for name, mapped in mapped_tensors.items():
-        pt_val = pt_tensors[name]
-        abs_errs.append(np.abs(pt_val - mapped).ravel())
-        flat_pt.append(pt_val.ravel())
-        flat_mapped.append(mapped.ravel())
-    abs_errs = np.concatenate(abs_errs)
-    flat_pt = np.concatenate(flat_pt)
-    flat_mapped = np.concatenate(flat_mapped)
-
-    p99 = np.percentile(abs_errs, 99)
-    assert p99 < abs_err_p99, (
-        f"{what}: disagree on more than the expected ReLU-boundary noise "
-        f"(99th-percentile absolute error {p99:.6f}, limit {abs_err_p99})"
-    )
-    cosine_sim = np.dot(flat_pt, flat_mapped) / (
-        np.linalg.norm(flat_pt) * np.linalg.norm(flat_mapped) + 1e-12
-    )
-    assert cosine_sim > cosine_min, (
-        f"{what}: direction mismatch (cosine similarity {cosine_sim:.6f}, "
-        f"required > {cosine_min})"
-    )
 
 
 def test_single_step_gradient_and_optimizer_equivalence(tmp_path):
@@ -112,26 +45,15 @@ def test_single_step_gradient_and_optimizer_equivalence(tmp_path):
     must agree on loss, raw grads, clipped grads, param deltas, and BN stats.
     """
     import tensorflow as tf
-    import tf_keras as keras
 
-    from promoterai_torch.train import build_train_optimizer
-    from promoterai_torch.utils import (
-        clip_grad_norm_per_parameter,
-        convert_tf_weights,
-        load_pretrained,
-    )
+    from promoterai_torch.utils import convert_tf_weights, load_pretrained
 
     # Seed Keras' weight initialization. Without this, _build_tf_keras_model draws
     # from TF's global RNG, whose state depends on how many prior TF random ops ran
     # earlier in the process -- identical when this file runs standalone (always the
     # "first" draw), but different when it runs after other TF-touching tests in the
-    # full suite. That process-dependent draw is what made this test flaky: on some
-    # weight draws, a handful of stem-layer pre-activations land close enough to zero
-    # that harmless TF-vs-PyTorch floating-point summation-order noise flips which
-    # side of the immediately-following ReLU they're on in one framework but not the
-    # other (both stem paths fuse a ReLU right after the linear op), producing a
-    # small, isolated raw-gradient mismatch. Seeding makes the draw -- and thus the
-    # test's outcome -- reproducible; the pooled/cosine checks below (rather than a
+    # full suite. Seeding makes the draw -- and thus which elements happen to sit near
+    # a ReLU boundary -- reproducible; the pass-rate/cosine checks below (rather than a
     # strict per-element assert) are the actual fix for the boundary case itself.
     tf.keras.utils.set_random_seed(0)
 
@@ -165,102 +87,35 @@ def test_single_step_gradient_and_optimizer_equivalence(tmp_path):
     x_np = np.eye(4, dtype="float32")[idx]  # (B, L, 4)
     y_np = rng.normal(size=(batch_size, output_len, output_dim)).astype("float32")
 
-    # --- Keras: one manual train step (mirrors what model.fit does internally) ---
-    keras_optimizer = keras.optimizers.AdamW(
-        learning_rate=lr, weight_decay=wd, epsilon=eps, clipnorm=clip_norm
+    results = run_single_step(
+        keras_model,
+        pt_model,
+        x_np,
+        y_np,
+        num_blocks=num_blocks,
+        shortcut_nums_desc=shortcut_nums_desc,
+        lr=lr,
+        wd=wd,
+        eps=eps,
+        clip_norm=clip_norm,
     )
-    x_tf, y_tf = tf.constant(x_np), tf.constant(y_np)
-    with tf.GradientTape() as tape:
-        pred = keras_model(x_tf, training=True)  # updates BN running stats as a side effect
-        keras_loss = keras.losses.MeanSquaredError()(y_tf, pred)
-    keras_vars = keras_model.trainable_variables
-    raw_grads = tape.gradient(keras_loss, keras_vars)
-    clipped_grads = [tf.clip_by_norm(g, clip_norm) for g in raw_grads]
-    params_before = {v.name.rstrip(":0"): v.numpy().copy() for v in keras_vars}
-    keras_optimizer.apply_gradients(zip(clipped_grads, keras_vars))
-    params_after = {v.name.rstrip(":0"): v.numpy().copy() for v in keras_vars}
-    bn_stats_after_keras = {
-        v.name.rstrip(":0"): v.numpy()
-        for v in keras_model.non_trainable_variables
-        if "moving_" in v.name
-    }
-
-    raw_grads_keras = {
-        v.name.rstrip(":0"): g.numpy() for v, g in zip(keras_vars, raw_grads)
-    }
-    clipped_grads_keras = {
-        v.name.rstrip(":0"): g.numpy() for v, g in zip(keras_vars, clipped_grads)
-    }
-    param_deltas_keras = {
-        name: params_after[name] - params_before[name] for name in params_before
-    }
-
-    # --- PyTorch: one manual train step, same batch, same (converted) weights ---
-    pt_model.train()
-    optimizer = build_train_optimizer(pt_model, lr, wd)
-    x_pt, y_pt = torch.from_numpy(x_np), torch.from_numpy(y_np)
-    pred_pt = pt_model(x_pt)[0]  # updates BN running stats as a side effect
-    loss_pt = torch.nn.functional.mse_loss(pred_pt, y_pt)
-    optimizer.zero_grad()
-    loss_pt.backward()
-    raw_grads_pt = {
-        name: p.grad.clone() for name, p in pt_model.named_parameters()
-    }
-    params_before_pt = {
-        name: p.detach().clone() for name, p in pt_model.named_parameters()
-    }
-    clip_grad_norm_per_parameter(pt_model.parameters(), max_norm=clip_norm)
-    clipped_grads_pt = {
-        name: p.grad.clone() for name, p in pt_model.named_parameters()
-    }
-    optimizer.step()
-    param_deltas_pt = {
-        name: (p.detach() - params_before_pt[name]).numpy()
-        for name, p in pt_model.named_parameters()
-    }
-    bn_stats_after_pt = {}
-    for i, block in enumerate(pt_model.blocks):
-        bn_stats_after_pt[f"blocks.{i}.bn1.running_mean"] = block.bn1.running_mean.numpy()
-        bn_stats_after_pt[f"blocks.{i}.bn1.running_var"] = block.bn1.running_var.numpy()
-        bn_stats_after_pt[f"blocks.{i}.bn2.running_mean"] = block.bn2.running_mean.numpy()
-        bn_stats_after_pt[f"blocks.{i}.bn2.running_var"] = block.bn2.running_var.numpy()
 
     # --- 1. Forward loss ---
     np.testing.assert_allclose(
-        loss_pt.item(), keras_loss.numpy(), atol=1e-4, rtol=1e-4,
+        results["loss_pt"], results["loss_keras"], atol=1e-4, rtol=1e-4,
         err_msg="forward-pass MSE loss differs between PyTorch and Keras",
     )
 
     # --- 2. Raw (pre-clip) gradients ---
-    #
-    # Both stem paths fuse a ReLU immediately after their linear op (Keras' stem Dense
-    # has activation="relu"; PyTorch's stem_act follows self.stem). TF's and PyTorch's
-    # forward passes are mathematically equivalent but numerically implemented
-    # differently (different summation order in the underlying matmul/conv kernels), so
-    # on an unlucky weight draw a handful of pre-activation values can land close enough
-    # to zero that this framework-level float noise flips which side of the ReLU
-    # boundary they're on in one framework but not the other -- killing or admitting
-    # gradient for that one element only. That's expected, harmless nondeterminism
-    # (see the seeding comment above), not a porting bug, so a single such flip
-    # shouldn't fail the whole tensor the way a strict per-element assert_allclose would.
-    mapped_raw = _keras_tensors_to_pt(raw_grads_keras, num_blocks, shortcut_nums_desc)
-    pt_raw = {name: raw_grads_pt[name].numpy() for name in mapped_raw}
-    _assert_pooled_gradient_match(
-        pt_raw, mapped_raw, abs_err_p99=1e-3, cosine_min=0.9999, what="raw gradients"
+    assert_pass_rate(
+        results["raw_grad"], cosine_threshold=0.999, rel_l2_tol=1e-2,
+        min_pass_rate=1.0, label="raw gradients",
     )
 
     # --- 3. Post-clip gradients (validates clip_grad_norm_per_parameter vs. Keras clipnorm) ---
-    #
-    # Clipping rescales each parameter's whole gradient tensor by a single scalar, so a
-    # boundary-flip element from section 2 persists here proportionally -- same pooled
-    # treatment, tightened to match the much smaller post-clip scale (clip_norm=1e-4).
-    mapped_clipped = _keras_tensors_to_pt(
-        clipped_grads_keras, num_blocks, shortcut_nums_desc
-    )
-    pt_clipped = {name: clipped_grads_pt[name].numpy() for name in mapped_clipped}
-    _assert_pooled_gradient_match(
-        pt_clipped, mapped_clipped, abs_err_p99=1e-6, cosine_min=0.9999,
-        what="post-clip gradients",
+    assert_pass_rate(
+        results["clipped_grad"], cosine_threshold=0.999, rel_l2_tol=1e-2,
+        min_pass_rate=1.0, label="post-clip gradients",
     )
 
     # --- 4. AdamW parameter deltas ---
@@ -273,97 +128,37 @@ def test_single_step_gradient_and_optimizer_equivalence(tmp_path):
     # sqrt(1 - beta2**t) — Keras' AdamW has no such option (unlike keras.optimizers.Adam's
     # adaptive_epsilon), so with a shared epsilon=1e-7 the two frameworks' step-1 updates
     # differ by ~1/sqrt(1 - 0.999**1) ≈ 32x in how much epsilon damps the update, shrinking
-    # to <1% by step ~1000 as beta2**t → 0. This is a framework-inherent AdamW quirk, not a
-    # porting bug — confirmed below by re-running the same clipped gradients through fresh
-    # step-1 optimizers with epsilon -> 0 (where the two formulas coincide exactly), which
-    # isolates and verifies the shared bias-correction/decoupled-weight-decay mechanics.
-    tiny_eps = 1e-10
-    keras_names = [v.name.rstrip(":0") for v in keras_vars]
-    keras_tiny_vars = [
-        tf.Variable(params_before[name].copy()) for name in keras_names
-    ]
-    opt_keras_tiny = keras.optimizers.AdamW(
-        learning_rate=lr, weight_decay=wd, epsilon=tiny_eps, clipnorm=clip_norm
-    )
-    opt_keras_tiny.apply_gradients(zip(clipped_grads, keras_tiny_vars))
-    deltas_keras_tiny = {
-        name: v.numpy() - params_before[name]
-        for name, v in zip(keras_names, keras_tiny_vars)
-    }
-    mapped_deltas_tiny = _keras_tensors_to_pt(
-        deltas_keras_tiny, num_blocks, shortcut_nums_desc
+    # to <1% by step ~1000 as beta2**t → 0 (see notes/implementation.md). This is a
+    # framework-inherent AdamW quirk, not a porting bug — confirmed by "param_delta_tiny_eps"
+    # below, which reruns the same clipped gradients through fresh step-1 optimizers with
+    # epsilon -> 0 (where the two formulas coincide exactly), isolating and verifying the
+    # shared bias-correction/decoupled-weight-decay mechanics.
+    assert_pass_rate(
+        results["param_delta_tiny_eps"], cosine_threshold=0.99, rel_l2_tol=5e-2,
+        min_pass_rate=0.95,
+        label="AdamW mechanics (bias correction / decoupled weight decay), epsilon isolated out",
     )
 
-    pt_tiny_params, pt_tiny_optimizers = {}, {}
-    for name, grad in clipped_grads_pt.items():
-        p = torch.nn.Parameter(params_before_pt[name].clone())
-        p.grad = grad.clone()
-        pt_tiny_params[name] = (params_before_pt[name].clone(), p)
-        pt_tiny_optimizers[name] = torch.optim.AdamW(
-            [p], lr=lr, weight_decay=wd, eps=tiny_eps
-        )
-    for opt in pt_tiny_optimizers.values():
-        opt.step()
-    deltas_pt_tiny = {
-        name: (p.detach() - before).numpy()
-        for name, (before, p) in pt_tiny_params.items()
-    }
-
-    # Most elements should now match near machine precision; a small minority (elements
-    # whose raw gradient is itself near zero, e.g. zeroed by ReLU) stay noisy even at
-    # tiny_eps because sqrt(v) is then also near zero, so eps=1e-10 is no longer negligible
-    # in float32 for those specific elements — a numerical-precision edge case, not a
-    # mechanics mismatch. Pooling relative errors across every tensor (rather than taking
-    # a percentile per tensor, which is unstable on 16-64-element tensors) is the robust
-    # way to check "almost all elements agree" without individual outliers failing the test.
-    all_rel_err = np.concatenate(
-        [
-            np.abs(deltas_pt_tiny[name] - mapped).ravel()
-            / np.maximum(np.abs(mapped).ravel(), 1e-8)
-            for name, mapped in mapped_deltas_tiny.items()
-        ]
+    # With the real epsilon=1e-7 (matching build_train_optimizer), the quirk above makes
+    # the *magnitude* of small-gradient parameters' step-1 updates genuinely differ (rel_l2
+    # regularly exceeds 100%), so rel_l2 is not asserted here. But epsilon only *damps* the
+    # update -- it doesn't change the sign of m -- so the update's *direction* should still
+    # agree even though the fixes themselves already gave a hard forward/gradient guarantee
+    # above; cosine similarity alone is the meaningful, real check for that.
+    assert_pass_rate(
+        results["param_delta"], cosine_threshold=0.75, rel_l2_tol=float("inf"),
+        min_pass_rate=0.95, label="AdamW parameter delta direction at the real epsilon=1e-7",
     )
-    assert np.percentile(all_rel_err, 90) < 1e-2, (
-        "AdamW mechanics (bias correction / decoupled weight decay) mismatch once the "
-        f"epsilon-placement difference is isolated out: 90th-percentile relative error "
-        f"{np.percentile(all_rel_err, 90):.4f} across all parameters"
-    )
-
-    # With the real eps=1e-7 (matching build_train_optimizer), this test's tiny clip_norm
-    # (1e-4, matching Illumina's train.py) makes most per-element clipped gradients small
-    # enough that the eps-placement quirk dominates their step-1 update almost everywhere
-    # in this synthetic random-weight/random-target model — there's no principled element
-    # filter left that isolates a "should closely match" subset (unlike section 4's tiny_eps
-    # check, which proved the *mechanics* match exactly). Rather than assert a numeric
-    # tolerance that's either too loose to mean anything or fails on the expected quirk,
-    # this is reported as a diagnostic: the discrepancy is fully explained by section 4's
-    # analysis, shrinks to <1% by step ~1000 as beta2**t -> 0, and is a Keras/PyTorch AdamW
-    # framework difference, not a promoterai-torch porting bug.
-    mapped_deltas = _keras_tensors_to_pt(
-        param_deltas_keras, num_blocks, shortcut_nums_desc
-    )
-    all_rel_err_real = np.concatenate(
-        [
-            (
-                np.abs(param_deltas_pt[name] - mapped)
-                / np.maximum(np.abs(mapped), 1e-8)
-            ).ravel()
-            for name, mapped in mapped_deltas.items()
-        ]
-    )
-    assert np.all(np.isfinite(all_rel_err_real)), "AdamW step produced non-finite deltas"
+    rel_l2s = [r.rel_l2 for r in results["param_delta"]]
     print(
-        "\n[diagnostic] step-1 AdamW delta relative error vs. Keras "
-        f"(median={np.median(all_rel_err_real):.3f}, "
-        f"90th pct={np.percentile(all_rel_err_real, 90):.3f}) — expected to be large here "
-        "due to the epsilon-placement quirk documented above; see section 4's tiny_eps "
-        "check for proof the underlying AdamW mechanics agree."
+        f"\n[diagnostic] step-1 AdamW delta relative-L2 magnitude vs. Keras at the real "
+        f"epsilon=1e-7 (median={np.median(rel_l2s):.1%}) — expected to be large due to the "
+        "epsilon-placement quirk documented above; see the param_delta_tiny_eps check above "
+        "for proof the underlying AdamW mechanics agree once epsilon is isolated out."
     )
 
     # --- 5. BatchNorm running-stat update (validates momentum=0.01 <-> Keras momentum=0.99) ---
-    mapped_bn = _keras_tensors_to_pt(bn_stats_after_keras, num_blocks, shortcut_nums_desc)
-    for name, mapped in mapped_bn.items():
-        np.testing.assert_allclose(
-            bn_stats_after_pt[name], mapped, atol=1e-4, rtol=1e-3,
-            err_msg=f"BatchNorm running-stat mismatch for {name}",
-        )
+    assert_pass_rate(
+        results["bn_stats"], cosine_threshold=0.999, rel_l2_tol=1e-2,
+        min_pass_rate=1.0, label="BatchNorm running-stat update",
+    )

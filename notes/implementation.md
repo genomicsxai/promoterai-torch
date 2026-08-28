@@ -71,9 +71,13 @@ update is damped by up to ~32x more than PyTorch's (`1 / sqrt(1 - 0.999**1)`), c
 This is a framework-inherent AdamW quirk, not a porting bug — PyTorch's built-in `AdamW` has no
 option to replicate Keras' non-adaptive epsilon placement, and the effect is confined to roughly
 the first ~1,000 optimizer steps of a training run (real training runs for far longer), so it
-isn't worth a custom optimizer to chase. Confirmed in `tests/test_tf_gradient_equivalence.py`,
-which shows the two frameworks' AdamW *mechanics* (bias correction, decoupled weight decay)
-match exactly once epsilon is isolated out (`epsilon -> 0` on both sides).
+isn't worth a custom optimizer to chase. Confirmed in `tests/test_tf_gradient_equivalence.py`
+(toy scale) and `tests/test_tf_gradient_equivalence_real.py` (real checkpoint, GPU), which show
+the two frameworks' AdamW *mechanics* (bias correction, decoupled weight decay) agree by cosine
+similarity once epsilon is isolated out (`epsilon -> 0` on both sides), and that even at the real
+`epsilon=1e-7` the step's *direction* still agrees (only its magnitude differs, as expected) —
+see `tests/gradient_comparison_utils.py` for the cosine-similarity/relative-L2/pass-rate
+comparison methodology, adapted from alphagenome-pytorch's JAX-comparison test suite.
 
 ## Numerical equivalence (`examples/`)
 

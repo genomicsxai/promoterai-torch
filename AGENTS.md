@@ -105,14 +105,26 @@ Full predicted regulatory tracks are validated by `examples/compare_tf_torch_tra
 
 When changing parity examples, add or update tests in `tests/test_track_parity_examples.py`. These tests avoid the licensed SavedModels but cover dict-output normalization, per-head error calculation, random sequence generation, promoter sequence extraction, and CLI help smoke checks.
 
-`tests/test_tf_gradient_equivalence.py` runs one real cross-framework training step (Keras and PyTorch, identical converted weights and batch) and compares loss, raw/post-clip gradients, AdamW parameter deltas, and BatchNorm running stats — it does not need the licensed SavedModels. Along with `tests/test_convert.py`, it requires the `convert` extra (`tensorflow`/`tf-keras`) and is skipped by default, including in per-PR CI. Run both locally before merging any change to `architecture.py`, `train.py`, `finetune.py`, or the weight converter in `utils.py`:
+`tests/test_tf_gradient_equivalence.py` runs one real cross-framework training step (Keras and PyTorch, identical converted weights and batch, toy 8-block/dim-16 scale) and compares loss, raw/post-clip gradients, AdamW parameter deltas, and BatchNorm running stats — it does not need the licensed SavedModels. Along with `tests/test_convert.py`, it requires the `convert` extra (`tensorflow`/`tf-keras`) and is skipped by default, including in per-PR CI. Run both locally before merging any change to `architecture.py`, `train.py`, `finetune.py`, or the weight converter in `utils.py`:
 
 ```sh
 uv sync --group dev --extra convert
 uv run pytest tests/test_convert.py tests/test_tf_gradient_equivalence.py -v
 ```
 
-A weekly scheduled workflow (`tf-equivalence.yml`) also runs these, but only as a final failsafe against TF/PyTorch API drift on `main` — it is not a pre-merge gate, so don't rely on it to catch a regression in your own PR.
+Comparisons use cosine similarity (direction) and relative L2 norm (magnitude) per tensor, aggregated with a required pass *rate* across tensors, rather than elementwise `np.testing.assert_allclose` — see `tests/gradient_comparison_utils.py`. This mirrors alphagenome-pytorch's JAX-comparison "gradient ladder" methodology and is robust to a minority of tensors landing near a ReLU/near-zero-gradient boundary where ordinary framework floating-point noise can dominate a strict elementwise check without indicating a real bug. The shared single-step runner (`tests/keras_pytorch_step.py`) is reused by both this test and the real-checkpoint test below, so both stay in sync.
+
+`tests/test_tf_gradient_equivalence_real.py` runs the same comparison at real, full published scale (`num_blocks=24`, `model_dim=1024`) against a real Illumina Keras SavedModel — practically GPU-only. It's skipped by default (no such SavedModel ships with this repo) unless `--keras-savedmodel-path` is passed:
+
+```sh
+uv run pytest tests/test_tf_gradient_equivalence_real.py -v -s \
+    --keras-savedmodel-path /path/to/promoterai_keras_model \
+    --device cuda --gradient-batch-size 2
+```
+
+`--gradient-input-length`/`--gradient-output-length` (default: the published 20480/4096) and `--device` (default: cuda if available, else cpu) are also available; see `tests/conftest.py`.
+
+A weekly scheduled workflow (`tf-equivalence.yml`) also runs the toy-scale tests, but only as a final failsafe against TF/PyTorch API drift on `main` — it is not a pre-merge gate, so don't rely on it to catch a regression in your own PR. The real-checkpoint test isn't in that workflow (no GPU runner, no licensed SavedModel in CI) — run it yourself on a GPU box before merging changes that could plausibly behave differently at full scale.
 
 ## Key Data Details
 

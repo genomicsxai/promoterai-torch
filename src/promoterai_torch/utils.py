@@ -200,8 +200,15 @@ def export_inference_checkpoint(
             os.unlink(temp_path)
 
 
-def load_pretrained(checkpoint_path: str, map_location: str = "cpu"):
-    """Load a checkpoint and reconstruct PromoterAI. Returns (model, args_dict)."""
+def load_pretrained(
+    checkpoint_path: str, map_location: str = "cpu", dw_conv_backend: str = "auto"
+):
+    """Load a checkpoint and reconstruct PromoterAI. Returns (model, args_dict).
+
+    dw_conv_backend is a runtime perf choice, not part of the checkpoint's saved
+    architecture, so it's a parameter here rather than checkpoint metadata; see
+    MetaFormerBlock's docstring for the "auto"/"triton"/"torch" semantics.
+    """
     from promoterai_torch.architecture import PromoterAI
 
     ckpt = torch.load(checkpoint_path, map_location=map_location)
@@ -214,6 +221,7 @@ def load_pretrained(checkpoint_path: str, map_location: str = "cpu"):
         if "output_crop" in args
         else args["input_length"] - args["output_length"],
         shortcut_layer_freq=args.get("shortcut_layer_freq", 4),
+        dw_conv_backend=dw_conv_backend,
     )
     model.load_state_dict(normalize_model_state_dict(ckpt["model_state_dict"]))
     return model, args

@@ -1,6 +1,11 @@
 import torch
 from torch import nn
 
+from promoterai_torch.triton_ops import (
+    depthwise_dilated_conv1d_triton,
+    triton_dw_conv_supported,
+)
+
 
 def _dilation_rate(i):
     """Return dilation rate for block i: doubles every 2 blocks (1,1,1,1,2,2,4,4,…)."""
@@ -10,14 +15,34 @@ def _dilation_rate(i):
 class MetaFormerBlock(nn.Module):
     """Pre-norm token-mixing + channel-mixing residual block, PromoterAI's basic depth unit."""
 
-    def __init__(self, model_dim: int, kernel_size: int, dilation_rate: int):
-        """Pre-norm MetaFormer block: depthwise-conv token mixer + FFN channel mixer."""
+    def __init__(
+        self,
+        model_dim: int,
+        kernel_size: int,
+        dilation_rate: int,
+        dw_conv_backend: str = "auto",
+    ):
+        """Pre-norm MetaFormer block: depthwise-conv token mixer + FFN channel mixer.
+
+        dw_conv_backend selects how the depthwise conv is computed: "auto" uses a
+        fused Triton kernel when triton is installed and the current CUDA device
+        supports it (sm_70+), falling back to nn.Conv1d otherwise; "triton" forces
+        the fused kernel (raising if unsupported); "torch" always uses nn.Conv1d.
+        """
         super().__init__()
+        if dw_conv_backend not in ("auto", "triton", "torch"):
+            raise ValueError(
+                f"dw_conv_backend must be 'auto', 'triton', or 'torch'; got {dw_conv_backend!r}"
+            )
+        self.dilation_rate = dilation_rate
+        self.dw_conv_backend = dw_conv_backend
         # eps=1e-3 matches Keras BatchNormalization's default epsilon (1e-3).
         # momentum=0.01 matches Keras' default momentum=0.99: PyTorch's momentum
         # is the weight on the new batch statistic, Keras' is the weight on the
         # old running average, so they're complementary (0.01 = 1 - 0.99).
         self.bn1 = nn.BatchNorm1d(model_dim, eps=1e-3, momentum=0.01)
+        # Always constructed, even when the Triton backend is used at forward time:
+        # this keeps state_dict keys/shapes (and Keras checkpoint conversion) unchanged.
         self.dw_conv = nn.Conv1d(
             model_dim,
             model_dim,
@@ -45,11 +70,28 @@ class MetaFormerBlock(nn.Module):
         nn.init.zeros_(self.ffn1.bias)
         nn.init.zeros_(self.ffn2.bias)
 
+    def _use_triton_dw_conv(self, device: torch.device) -> bool:
+        """Decide whether the fused Triton kernel should run this depthwise conv."""
+        if self.dw_conv_backend == "torch":
+            return False
+        supported = triton_dw_conv_supported(device.type, device.index)
+        if self.dw_conv_backend == "triton" and not supported:
+            raise RuntimeError(
+                "dw_conv_backend='triton' requires the triton package and a CUDA "
+                "device with compute capability >= 7.0 (Volta or newer)."
+            )
+        return supported
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply token-mixing and FFN residual branches; x and output are (B, L, model_dim)."""
         x_t = x.transpose(1, 2)  # (B, model_dim, L)
         x_t = self.bn1(x_t)
-        x_t = self.dw_conv(x_t)
+        if self._use_triton_dw_conv(x_t.device):
+            x_t = depthwise_dilated_conv1d_triton(
+                x_t, self.dw_conv.weight, self.dw_conv.bias, self.dilation_rate
+            )
+        else:
+            x_t = self.dw_conv(x_t)
         x_t = x_t.transpose(1, 2)  # (B, L, model_dim)
         intermediate = x + x_t
 
@@ -109,8 +151,12 @@ class PromoterAI(nn.Module):
         kernel_size: int = 5,
         shortcut_layer_freq: int = 4,
         output_crop: int = 0,
+        dw_conv_backend: str = "auto",
     ):
-        """Build PromoterAI with given depth, width, per-species output dims, and center crop."""
+        """Build PromoterAI with given depth, width, per-species output dims, and center crop.
+
+        dw_conv_backend is forwarded to every MetaFormerBlock; see its docstring.
+        """
         super().__init__()
         self.num_blocks = num_blocks
         self.stem = nn.Conv1d(4, model_dim, 1)
@@ -120,7 +166,9 @@ class PromoterAI(nn.Module):
 
         self.blocks = nn.ModuleList(
             [
-                MetaFormerBlock(model_dim, kernel_size, _dilation_rate(i))
+                MetaFormerBlock(
+                    model_dim, kernel_size, _dilation_rate(i), dw_conv_backend=dw_conv_backend
+                )
                 for i in range(num_blocks)
             ]
         )

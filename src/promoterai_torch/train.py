@@ -47,6 +47,7 @@ def build_model(args, output_dims, device, world_size, rank):
         model_dim=args.model_dim,
         output_dims=output_dims,
         output_crop=args.input_length - args.output_length,
+        dw_conv_backend=args.dw_conv_backend,
     ).to(device)
     if world_size > 1 and not args.no_sync_batchnorm:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -495,6 +496,14 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         choices=("none", "bf16", "fp16"),
         default="none",
         help="Mixed-precision dtype for autocast; 'none' trains in full precision",
+    )
+    parser.add_argument(
+        "--dw_conv_backend",
+        choices=("auto", "triton", "torch"),
+        default="auto",
+        help="Depthwise-conv implementation: 'auto' uses a fused Triton kernel when "
+        "available (CUDA sm_70+) else nn.Conv1d, 'triton' forces it (errors if "
+        "unsupported), 'torch' always uses nn.Conv1d (default: %(default)s)",
     )
     parser.add_argument(
         "--resume_checkpoint",

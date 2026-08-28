@@ -71,6 +71,7 @@ from tests.keras_pytorch_step import force_tf_cpu, run_single_step
 pytest.importorskip("tf_keras", reason="tf-keras not installed")
 
 
+@pytest.mark.parametrize("dw_conv_backend", ["torch", "triton"])
 def test_real_checkpoint_single_step_gradient_equivalence(
     tmp_path,
     keras_savedmodel_path,
@@ -78,12 +79,30 @@ def test_real_checkpoint_single_step_gradient_equivalence(
     gradient_batch_size,
     gradient_input_length,
     gradient_output_length,
+    dw_conv_backend,
 ):
-    """One AdamW(clipnorm=...) step per output head, real checkpoint scale."""
+    """One AdamW(clipnorm=...) step per output head, real checkpoint scale.
+
+    Parametrized over the depthwise-conv backend so the fused Triton kernel is
+    checked against Keras at the same tolerance as the plain nn.Conv1d path, not
+    just against nn.Conv1d itself (see tests/test_triton_ops.py for that direct
+    comparison). The "triton" case is skipped when the resolved --device isn't a
+    CUDA GPU with triton installed and compute capability >= 7.0.
+    """
     force_tf_cpu()  # before any TF op, including inside convert_tf_weights below
+    import torch
     import tf_keras as keras
 
+    from promoterai_torch.triton_ops import triton_dw_conv_supported
     from promoterai_torch.utils import convert_tf_weights, load_pretrained
+
+    if dw_conv_backend == "triton":
+        device = torch.device(gradient_device)
+        if not triton_dw_conv_supported(device.type, device.index):
+            pytest.skip(
+                "dw_conv_backend='triton' requires triton installed and a CUDA "
+                "device with compute capability >= 7.0 (Volta or newer)"
+            )
 
     out_pt = str(tmp_path / "model.pt")
     convert_tf_weights(
@@ -92,7 +111,7 @@ def test_real_checkpoint_single_step_gradient_equivalence(
         input_length=gradient_input_length,
         output_length=gradient_output_length,
     )
-    _, args = load_pretrained(out_pt)
+    _, args = load_pretrained(out_pt, dw_conv_backend=dw_conv_backend)
     num_blocks = args["num_blocks"]
     shortcut_layer_freq = args.get("shortcut_layer_freq", 4)
     shortcut_nums_desc = list(range(num_blocks, 0, -shortcut_layer_freq))
@@ -120,7 +139,7 @@ def test_real_checkpoint_single_step_gradient_equivalence(
     for active_idx in range(len(output_dims)):
         # Fresh model instances per head so each iteration starts from the same
         # pristine checkpoint weights, not the previous iteration's post-step state.
-        pt_model, _ = load_pretrained(out_pt)
+        pt_model, _ = load_pretrained(out_pt, dw_conv_backend=dw_conv_backend)
         keras_model = keras.models.load_model(keras_savedmodel_path)
 
         y_np = [

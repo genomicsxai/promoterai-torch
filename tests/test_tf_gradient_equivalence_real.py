@@ -39,7 +39,7 @@ import numpy as np
 import pytest
 
 from tests.gradient_comparison_utils import assert_pass_rate
-from tests.keras_pytorch_step import run_single_step
+from tests.keras_pytorch_step import force_tf_cpu, run_single_step
 
 pytest.importorskip("tf_keras", reason="tf-keras not installed")
 
@@ -53,6 +53,7 @@ def test_real_checkpoint_single_step_gradient_equivalence(
     gradient_output_length,
 ):
     """One AdamW(clipnorm=...) step on identical weights/batch, real checkpoint scale."""
+    force_tf_cpu()  # before any TF op, including inside convert_tf_weights below
     import tf_keras as keras
 
     from promoterai_torch.utils import convert_tf_weights, load_pretrained

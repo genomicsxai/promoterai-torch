@@ -14,6 +14,26 @@ import numpy as np
 from tests.gradient_comparison_utils import compare_all
 
 
+def force_tf_cpu() -> None:
+    """Make TensorFlow ignore any visible GPUs for the rest of the process.
+
+    Must be called before TF touches a GPU device at all (including inside
+    convert_tf_weights/keras.models.load_model, not just this module's own ops) --
+    call it first thing, before any other TF-touching code runs.
+
+    Two independent reasons this matters, not just "avoid contending with PyTorch
+    for the same GPU's VRAM": tf_keras.layers.DepthwiseConv1D implements dilated
+    convolution via SpaceToBatchND, which multiplies the *batch dimension* by the
+    dilation rate for that op -- up to 512-1024x for this model's deepest blocks
+    -- so a GPU that comfortably holds the equivalent PyTorch computation can
+    still OOM on the Keras side alone. CPU/system RAM has none of this problem in
+    practice (much more headroom, and no such GPU-specific kernel blowup).
+    """
+    import tensorflow as tf
+
+    tf.config.set_visible_devices([], "GPU")
+
+
 def keras_tensors_to_pt(
     tensors: dict, num_blocks: int, shortcut_nums_desc: list, species: tuple = ("human",)
 ) -> dict:
@@ -88,6 +108,7 @@ def run_single_step(
     with epsilon -> 0 on both sides, which isolates and verifies the AdamW mechanics
     (bias correction, decoupled weight decay) agree regardless of that quirk.
     """
+    force_tf_cpu()
     import tensorflow as tf
     import tf_keras as keras
     import torch

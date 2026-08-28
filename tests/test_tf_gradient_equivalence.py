@@ -85,7 +85,7 @@ def test_single_step_gradient_and_optimizer_equivalence(tmp_path):
     rng = np.random.default_rng(0)
     idx = rng.integers(0, 4, size=(batch_size, input_len))
     x_np = np.eye(4, dtype="float32")[idx]  # (B, L, 4)
-    y_np = rng.normal(size=(batch_size, output_len, output_dim)).astype("float32")
+    y_np = [rng.normal(size=(batch_size, output_len, output_dim)).astype("float32")]
 
     results = run_single_step(
         keras_model,

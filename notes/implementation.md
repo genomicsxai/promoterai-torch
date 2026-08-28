@@ -79,6 +79,51 @@ similarity once epsilon is isolated out (`epsilon -> 0` on both sides), and that
 see `tests/gradient_comparison_utils.py` for the cosine-similarity/relative-L2/pass-rate
 comparison methodology, adapted from alphagenome-pytorch's JAX-comparison test suite.
 
+## Multi-species loss must use a soft zero, not a hard skip (`src/promoterai_torch/train.py`)
+
+Illumina's `tfrecords.py` handles multi-species batches (e.g. human + mouse) with a
+*soft* zero, not by excluding the inactive species from the loss:
+
+```python
+y = tuple(y if sw else [[0.]] for sw in sample_weight)
+sample_weight = tuple(sw * tf.reduce_max(x) for sw in sample_weight)
+```
+
+The inactive species' target is a dummy placeholder (broadcasting to zero against the
+real prediction shape) and its `sample_weight` is `0`, so its loss term is still
+computed and stays in the graph — it just evaluates to zero, and via the chain rule
+(differentiating a term multiplied by the *constant* `0`) so does its gradient. Because
+that gradient is a real, present zero rather than absent, Keras' `AdamW` still runs
+`_apply_weight_decay` on that species' output head every batch (a separate,
+gradient-independent `variable -= variable * weight_decay * lr` step in the optimizer's
+base class), regardless of which species happens to be active that batch.
+
+`compute_loss` originally used a hard Python-level skip instead:
+
+```python
+if y_true.shape[-1] == 1:
+    continue  # dummy target for non-matching species
+```
+
+`continue`-ing meant that species' predictions never entered the loss graph at all, so
+PyTorch's autograd left `.grad` as `None` (not zero) for that head's parameters, and
+`torch.optim.AdamW.step()` skips any parameter whose gradient is `None` — including its
+weight decay. Net effect: our port decayed an inactive-that-batch head's parameters
+*less often* than Illumina's real training does (only on that head's own active
+batches, not every batch), a real behavioral divergence, not a rounding artifact
+(though at `lr=5e-4, weight_decay=5e-6`, a single batch's decay-only change is only
+`~2.5e-9` relative to the variable — often below float32's representable precision
+against a typical ~0.01-0.1 weight, so it may not be *visible* step to step; it still
+compounds differently over the course of training).
+
+Fixed by replacing the `continue` with the same broadcast-to-zero substitution Illumina
+uses (`y_true = torch.zeros_like(y_pred)`), keeping the weighted term in the loss sum
+unconditionally. See `test_compute_loss_keeps_dummy_species_in_gradient_graph` in
+`tests/test_train.py`, and `tests/keras_pytorch_step.py`'s `weights` parameter /
+`tests/test_tf_gradient_equivalence_real.py`'s per-head loop, which verify this
+cross-framework (including that the inactive head's parameters change identically on
+both sides, whatever that change rounds to).
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

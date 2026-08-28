@@ -103,13 +103,23 @@ def build_train_optimizer(model, learning_rate: float, weight_decay: float):
 
 
 def compute_loss(outputs, y_tuple, w_tuple):
-    """Compute per-species weighted MSE loss; skips species whose y has only 1 track (dummy)."""
+    """Compute per-species weighted MSE loss, matching Illumina's tfrecords.py
+    _prepare_sample convention exactly: a species not present in this batch gets a
+    dummy target (SequenceDataset._prepare_sample's (1, 1) placeholder, detected here
+    by its last dim) and w_tuple==0 for it, which zeroes both the loss value and (via
+    the chain rule, since w_tuple is a constant multiplier) its gradient -- but keeps
+    the term in the graph. Unlike a hard skip (which would leave that species' output
+    head with grad=None, and PyTorch's optimizer would then skip weight decay for it
+    entirely on this batch), this way every head gets a real, if zero, gradient every
+    batch, so weight decay applies uniformly regardless of which species happens to be
+    active -- Keras' AdamW does the same for Illumina's sample_weight=0 broadcast term.
+    """
     loss = torch.tensor(0.0, device=outputs[0].device)
     if w_tuple.dim() == 1:
         w_tuple = w_tuple.unsqueeze(0)
     for j, (y_pred, y_true) in enumerate(zip(outputs, y_tuple)):
         if y_true.shape[-1] == 1:
-            continue  # dummy target for non-matching species
+            y_true = torch.zeros_like(y_pred)  # dummy target broadcasts to all-zero
         per_sample = F.mse_loss(y_pred, y_true, reduction="none").mean(
             dim=(1, 2)
         )  # (B,)

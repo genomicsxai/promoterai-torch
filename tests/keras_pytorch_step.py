@@ -34,6 +34,36 @@ def force_tf_cpu() -> None:
     tf.config.set_visible_devices([], "GPU")
 
 
+def normalize_keras_outputs(pred) -> tuple[list, tuple | None]:
+    """Return (every species head's output tensor, that head's species name if known),
+    in a stable human/hg38-first, mouse/mm10-second order (mirrors track_parity_utils.py's
+    outputs_in_stable_order).
+
+    Multi-species Keras functional models (e.g. human+mouse) return a dict keyed by
+    species name rather than a plain tensor/tuple; the dict's own keys are ground
+    truth for species names (needed to align keras_tensors_to_pt's shortcut_{species}{N}
+    weight lookups), so they're returned too rather than relying on a caller-supplied
+    guess. The PyTorch side's tuple output has no such names -- it's always ordered to
+    match convert_tf_weights' species_order (itself human/hg38-first by the convention
+    AGENTS.md documents), so sorting the dict the same way lines the two sides' heads up
+    one-to-one positionally regardless.
+    """
+    if isinstance(pred, dict):
+        def _rank(key):
+            key_str = str(key).lower()
+            if "human" in key_str or "hg38" in key_str:
+                return (0, key_str)
+            if "mouse" in key_str or "mm10" in key_str:
+                return (1, key_str)
+            return (2, key_str)
+
+        ordered_keys = sorted(pred, key=_rank)
+        return [pred[k] for k in ordered_keys], tuple(str(k) for k in ordered_keys)
+    if isinstance(pred, (list, tuple)):
+        return list(pred), None
+    return [pred], None
+
+
 def keras_tensors_to_pt(
     tensors: dict, num_blocks: int, shortcut_nums_desc: list, species: tuple = ("human",)
 ) -> dict:
@@ -88,7 +118,7 @@ def run_single_step(
     keras_model,
     pt_model,
     x_np: np.ndarray,
-    y_np: np.ndarray,
+    y_np: list,
     *,
     num_blocks: int,
     shortcut_nums_desc: list,
@@ -99,6 +129,7 @@ def run_single_step(
     device: str = "cpu",
     species: tuple = ("human",),
     tiny_eps: float = 1e-10,
+    weights: list | None = None,
 ) -> dict:
     """Run one AdamW(clipnorm=...) training step in Keras and in PyTorch on the same
     batch through identical (converted) weights, and return cosine/rel-L2 comparison
@@ -107,6 +138,19 @@ def run_single_step(
     Keras' AdamW places differently than PyTorch's, see notes/implementation.md) and
     with epsilon -> 0 on both sides, which isolates and verifies the AdamW mechanics
     (bias correction, decoupled weight decay) agree regardless of that quirk.
+
+    y_np is one target array per output head, in the same order as pred_pt's tuple
+    (and the Keras dict once stable-sorted -- see normalize_keras_outputs). weights is
+    one scalar per head (default: all 1.0), mirroring train.py's compute_loss w_tuple /
+    dataset.py's sample_weight: a species not in this batch gets weight 0.0, zeroing
+    both its loss contribution and (via the chain rule) its gradient, while a head
+    whose target has last dim 1 is treated as that species' dummy placeholder and its
+    target is substituted with zeros purely to keep the shapes broadcastable -- the
+    *value* used there doesn't matter once its weight is 0. This mirrors Illumina's
+    tfrecords.py exactly (soft zero, not a hard skip): a real multi-species training
+    step never sums every species' loss, but every head still gets a real (if zero)
+    gradient every step, so weight decay applies uniformly regardless of which species
+    happens to be active that step (see compute_loss's docstring for why that matters).
     """
     force_tf_cpu()
     import tensorflow as tf
@@ -115,17 +159,36 @@ def run_single_step(
 
     from promoterai_torch.utils import clip_grad_norm_per_parameter
 
-    def mapped(tensors):
-        return keras_tensors_to_pt(tensors, num_blocks, shortcut_nums_desc, species)
-
     # --- Keras: one manual train step (mirrors what model.fit does internally) ---
     keras_optimizer = keras.optimizers.AdamW(
         learning_rate=lr, weight_decay=wd, epsilon=eps, clipnorm=clip_norm
     )
-    x_tf, y_tf = tf.constant(x_np), tf.constant(y_np)
+    x_tf = tf.constant(x_np)
+    y_tf_list = [tf.constant(y) for y in y_np]
+    head_weights = weights if weights is not None else [1.0] * len(y_np)
     with tf.GradientTape() as tape:
         pred = keras_model(x_tf, training=True)  # updates BN running stats as a side effect
-        keras_loss = keras.losses.MeanSquaredError()(y_tf, pred)
+        pred_list, derived_species = normalize_keras_outputs(pred)
+        # Mirrors train.py's compute_loss / dataset.py's _prepare_sample exactly: the
+        # weight (not the dummy target) is what zeroes an inactive species' loss value
+        # and, via the chain rule, its gradient -- the target substitution below is only
+        # to keep shapes broadcastable, since 0 * anything is 0 regardless of what that
+        # "anything" was. Crucially, the term still stays in the graph, so that head
+        # gets a real, zero gradient rather than none, and weight decay still applies
+        # to it this step, matching Illumina's sample_weight=0 convention rather than a
+        # hard skip -- see compute_loss's docstring for why that distinction matters.
+        mse = keras.losses.MeanSquaredError()
+        losses = [
+            w * mse(y if y.shape[-1] != 1 else tf.zeros_like(p), p)
+            for w, y, p in zip(head_weights, y_tf_list, pred_list)
+        ]
+        keras_loss = tf.add_n(losses)
+
+    effective_species = derived_species if derived_species is not None else species
+
+    def mapped(tensors):
+        return keras_tensors_to_pt(tensors, num_blocks, shortcut_nums_desc, effective_species)
+
     keras_vars = keras_model.trainable_variables
     keras_names = [v.name.rstrip(":0") for v in keras_vars]
     raw_grads = tape.gradient(keras_loss, keras_vars)
@@ -158,9 +221,14 @@ def run_single_step(
     pt_model.train()
     optimizer = torch.optim.AdamW(pt_model.parameters(), lr=lr, weight_decay=wd, eps=eps)
     x_pt = torch.from_numpy(x_np).to(torch_device)
-    y_pt = torch.from_numpy(y_np).to(torch_device)
-    pred_pt = pt_model(x_pt)[0]  # updates BN running stats as a side effect
-    loss_pt = torch.nn.functional.mse_loss(pred_pt, y_pt)
+    y_pt_list = [torch.from_numpy(y).to(torch_device) for y in y_np]
+    preds_pt = pt_model(x_pt)  # tuple, one per head; updates BN stats as a side effect
+    loss_pt = sum(
+        w * torch.nn.functional.mse_loss(
+            p, y if y.shape[-1] != 1 else torch.zeros_like(p)
+        )
+        for w, y, p in zip(head_weights, y_pt_list, preds_pt)
+    )
     optimizer.zero_grad()
     loss_pt.backward()
     raw_grads_pt = {n: p.grad.detach().clone() for n, p in pt_model.named_parameters()}

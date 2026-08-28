@@ -209,6 +209,33 @@ def test_compute_loss_accepts_uncollated_single_sample_weights():
     assert loss == 0.25 * F.mse_loss(outputs[0], y_tuple[0])
 
 
+def test_compute_loss_keeps_dummy_species_in_gradient_graph():
+    """A species with w_tuple==0 (dummy (1, 1) target -- not present in this batch)
+    must still get a real, zero gradient, not None. Illumina's tfrecords.py broadcasts
+    the same dummy target and multiplies by sample_weight=0, which zeroes the value and
+    (via the chain rule) the gradient but keeps the term in the graph, so Keras' AdamW
+    still applies weight decay to that head every batch. A hard skip would instead leave
+    grad=None, and torch.optim.AdamW.step() skips weight decay entirely for such params
+    -- a real behavioral divergence from Illumina's training this guards against.
+    """
+    active_output = torch.ones(1, 4, 2, requires_grad=True)
+    dummy_output = torch.full((1, 4, 3), 5.0, requires_grad=True)
+    outputs = (active_output, dummy_output)
+    y_tuple = (
+        torch.zeros(1, 4, 2),
+        torch.zeros(1, 1, 1),  # SequenceDataset._prepare_sample's dummy placeholder shape
+    )
+    w_tuple = torch.tensor([[1.0, 0.0]])
+
+    loss = compute_loss(outputs, y_tuple, w_tuple)
+    loss.backward()
+
+    assert dummy_output.grad is not None
+    assert torch.all(dummy_output.grad == 0)
+    assert active_output.grad is not None
+    assert not torch.all(active_output.grad == 0)
+
+
 def test_run_epoch_clips_each_parameter_independently(monkeypatch):
     calls = []
     model = _TwoParameterTrackModel()

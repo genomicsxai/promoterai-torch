@@ -38,7 +38,7 @@ class PromoterAIWrapper(nn.Module):
 ## Dependency layout
 
 - Core (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tqdm` — no TensorFlow
-- `[convert]`: `tensorflow-cpu` (Linux/Windows) or `tensorflow` (macOS), `tf-keras`
+- `[convert]`: `tensorflow`, `tf-keras` — don't add a platform-conditional `tensorflow-cpu` here; `tf-keras` already requires plain `tensorflow` unconditionally, and installing both corrupts site-packages (see AGENTS.md's Dependencies section)
 - `[train]`: `h5py`, `scipy`, `pyBigWig`
 - `[dev]`: `pytest`, `h5py`, `scipy`, `tangermeme>=0.5`
 

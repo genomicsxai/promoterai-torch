@@ -1849,10 +1849,8 @@ dependencies = [
 
 [package.optional-dependencies]
 convert = [
-    { name = "tensorflow", version = "2.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' and sys_platform == 'darwin'" },
-    { name = "tensorflow", version = "2.21.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform == 'darwin'" },
-    { name = "tensorflow-cpu", version = "2.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' and sys_platform != 'darwin'" },
-    { name = "tensorflow-cpu", version = "2.21.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin'" },
+    { name = "tensorflow", version = "2.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "tensorflow", version = "2.21.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "tf-keras", version = "2.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "tf-keras", version = "2.21.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
 ]
@@ -1896,8 +1894,7 @@ requires-dist = [
     { name = "pybigtools", marker = "extra == 'train'", specifier = ">=0.2.5" },
     { name = "pyfaidx", specifier = ">=0.8" },
     { name = "tangermeme", marker = "extra == 'interpret'", specifier = ">=0.5" },
-    { name = "tensorflow", marker = "sys_platform == 'darwin' and extra == 'convert'" },
-    { name = "tensorflow-cpu", marker = "sys_platform != 'darwin' and extra == 'convert'" },
+    { name = "tensorflow", marker = "extra == 'convert'" },
     { name = "tf-keras", marker = "extra == 'convert'" },
     { name = "torch", specifier = ">=2.1" },
     { name = "tqdm", specifier = ">=4.0" },
@@ -2739,128 +2736,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/72/72/343b86b4c9bfe28e81f749439f908c1e26aeac73d9f12b8dcdb996eb8ecb/tensorflow-2.21.0-cp313-cp313-manylinux_2_27_aarch64.whl", hash = "sha256:a10abdfb8b1189210c251021a3f153b7ccc52a8e6521351f3dc3331e8ba593e0", size = 282213003, upload-time = "2026-03-06T17:24:59.859Z" },
     { url = "https://files.pythonhosted.org/packages/86/6c/10d075ffc09754c7f10e749ba3c9d46dd809fb007990c7f788128044180c/tensorflow-2.21.0-cp313-cp313-manylinux_2_27_x86_64.whl", hash = "sha256:e9d8da8dcab9650efb45f032ba70af2f016f907e6e0c6bda29dd101bba945406", size = 572881074, upload-time = "2026-03-06T17:25:14.453Z" },
     { url = "https://files.pythonhosted.org/packages/86/91/dedad8403e7b0036d99be4878987693b7b7f62097eb8537fa6ce62ea131c/tensorflow-2.21.0-cp313-cp313-win_amd64.whl", hash = "sha256:76cccbe0a95d9392dee1ae501ae0656b6c73c1cac29a7f8f32d570e0670863f7", size = 351205371, upload-time = "2026-03-06T17:25:33.144Z" },
-]
-
-[[package]]
-name = "tensorflow-cpu"
-version = "2.18.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.13' and sys_platform == 'win32'",
-    "python_full_version >= '3.13' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-]
-dependencies = [
-    { name = "absl-py" },
-    { name = "astunparse" },
-    { name = "flatbuffers" },
-    { name = "gast" },
-    { name = "google-pasta" },
-    { name = "grpcio" },
-    { name = "h5py" },
-    { name = "keras", version = "3.14.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "libclang" },
-    { name = "ml-dtypes", version = "0.4.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "numpy" },
-    { name = "opt-einsum" },
-    { name = "packaging" },
-    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "requests" },
-    { name = "setuptools" },
-    { name = "six" },
-    { name = "tensorboard" },
-    { name = "tensorflow-intel", marker = "sys_platform == 'win32'" },
-    { name = "termcolor" },
-    { name = "typing-extensions" },
-    { name = "wrapt" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/86/f5/4e97a17fadd91f77bfdac18523eced22201b5df5bd7c969e9ff8cbda1f51/tensorflow_cpu-2.18.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9f98466fde4a307d39b71309b1a9a8a4f1bb972e70d36b1ead0817405cc518f2", size = 230006617, upload-time = "2024-10-25T00:16:55.903Z" },
-    { url = "https://files.pythonhosted.org/packages/ea/9d/c1d0e5b7d69466d93761ba34f87eb35de4dfffcc55761722ef6b680c9abd/tensorflow_cpu-2.18.0-cp310-cp310-win_amd64.whl", hash = "sha256:482dc228f513c65bbe34abbb7c456765bd8e1599dbeae0924fc96d97578f9987", size = 7571, upload-time = "2024-10-25T00:17:01.837Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/1d/032a9d40762895e51cad06f382135c14d16487a0ad9dcc65aae5bd89c968/tensorflow_cpu-2.18.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:089e71746960ea581dca53401f84b3b99c8537313e337a9e5dbf97036a936f7e", size = 230152077, upload-time = "2024-10-25T00:17:06.143Z" },
-    { url = "https://files.pythonhosted.org/packages/ac/19/c254bb3df8f1325cc7c7ad7db2ec7cf704a04e7a682b6352a6129fbefbc4/tensorflow_cpu-2.18.0-cp311-cp311-win_amd64.whl", hash = "sha256:c61ef38e24686cd460e31f988ea36f73092ccc628193df95116d6c5f690393f9", size = 7570, upload-time = "2024-10-25T00:17:13.224Z" },
-    { url = "https://files.pythonhosted.org/packages/ca/3f/2ed163140237aefa72c761d56af8ba3fa5cb0fe37a9f53b14ad8bcd7ef87/tensorflow_cpu-2.18.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:39bd421ad125e4163d6e2d41ab0e158b583fb5c6f9254522fb87635b0e70b891", size = 230265586, upload-time = "2024-10-25T00:17:17.656Z" },
-    { url = "https://files.pythonhosted.org/packages/0e/7a/1c99bb2bb7d24238b748f9f0244a198ee15d23782bb56dbf4e7b93a29c6a/tensorflow_cpu-2.18.0-cp312-cp312-win_amd64.whl", hash = "sha256:0b093b727c2f2a8cf4ee4f2c7352c8e958a2a1d27a452961b8d5f43a0798dcd2", size = 7572, upload-time = "2024-10-25T00:17:22.893Z" },
-]
-
-[[package]]
-name = "tensorflow-cpu"
-version = "2.21.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
-    "python_full_version == '3.11.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.11.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.11.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version < '3.11'",
-]
-dependencies = [
-    { name = "absl-py" },
-    { name = "astunparse" },
-    { name = "flatbuffers" },
-    { name = "gast" },
-    { name = "google-pasta" },
-    { name = "grpcio" },
-    { name = "h5py" },
-    { name = "keras", version = "3.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or python_full_version >= '3.13'" },
-    { name = "keras", version = "3.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.13'" },
-    { name = "libclang" },
-    { name = "ml-dtypes", version = "0.5.4", source = { registry = "https://pypi.org/simple" } },
-    { name = "numpy" },
-    { name = "opt-einsum" },
-    { name = "packaging" },
-    { name = "protobuf", version = "7.34.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "requests" },
-    { name = "setuptools" },
-    { name = "six" },
-    { name = "termcolor" },
-    { name = "typing-extensions" },
-    { name = "wrapt" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d9/6e/134b8f01c4a978cb8aa30b776836ef6335348db73d4feb91bcc7392bf629/tensorflow_cpu-2.21.0-cp310-cp310-manylinux_2_27_x86_64.whl", hash = "sha256:d143e92f5c0661cdfa26eaca8f73cd2efd0ec53a68af8dec82f584ba8eb14b83", size = 273601549, upload-time = "2026-03-06T17:25:45.798Z" },
-    { url = "https://files.pythonhosted.org/packages/7c/81/356d3d79193694c64fdd898d9de374c60dd2d92eb7f54fc1bac408390aab/tensorflow_cpu-2.21.0-cp310-cp310-win_amd64.whl", hash = "sha256:efedd440b039df65171e85be61eea83b040025a7afc30d642763a7b902c23387", size = 350609659, upload-time = "2026-03-06T17:25:56.011Z" },
-    { url = "https://files.pythonhosted.org/packages/59/03/9a99555a762de8cd4a405efbd39a732d926d8e58791441889560b7675b3e/tensorflow_cpu-2.21.0-cp311-cp311-manylinux_2_27_x86_64.whl", hash = "sha256:2b847d217b02ee7731ed91431daf3250daa0196c3c94614d23be27232e6e5b6c", size = 273829956, upload-time = "2026-03-06T17:26:07.979Z" },
-    { url = "https://files.pythonhosted.org/packages/58/ad/288f53b8cd745b0d1c067c3ddc04936d0f0f5ca3a3882912f01c046f4cc6/tensorflow_cpu-2.21.0-cp311-cp311-win_amd64.whl", hash = "sha256:6fc992a9c8700e18c178b0525f4e7697e58fce88df0dcb95db4dd3c7ad5f4651", size = 350834051, upload-time = "2026-03-06T17:26:20.352Z" },
-    { url = "https://files.pythonhosted.org/packages/6f/07/a691049cb74276164d8449de9e25c4f51ad3111a3eba86358395d2552fc3/tensorflow_cpu-2.21.0-cp312-cp312-manylinux_2_27_x86_64.whl", hash = "sha256:dcc8afd32930e42d5296b6ee19078b773706830af4ea97fbe503b9f5e0f820cb", size = 274000871, upload-time = "2026-03-06T17:26:32.489Z" },
-    { url = "https://files.pythonhosted.org/packages/c1/db/5e8318ee782607f152bb55372a9d0a5197ddfaa63325c800dfc04f9d5e41/tensorflow_cpu-2.21.0-cp312-cp312-win_amd64.whl", hash = "sha256:13ed4af80e5c5ddd6849323abecb4804eb2770f7570b57fe20208ad1e58c5d12", size = 350945555, upload-time = "2026-03-06T17:26:42.742Z" },
-    { url = "https://files.pythonhosted.org/packages/ac/21/48cd18bfd214042ecb7392e01e016d3dd60b4f1ef13f10954ab472cd3c13/tensorflow_cpu-2.21.0-cp313-cp313-manylinux_2_27_x86_64.whl", hash = "sha256:05af7c26d35f4de910b5598c7b507e3981831a7b0f47fed9a405d995d51d7793", size = 274271560, upload-time = "2026-03-06T17:26:55.668Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/a8/9453d4440d9f248975355ec8e5acc3c684c114d923e257e8082b3b71dbaa/tensorflow_cpu-2.21.0-cp313-cp313-win_amd64.whl", hash = "sha256:b1f474fb27ff458d2a349f70bb3314d5bee3daddd9e8d8d8a6edd1cd680c90fe", size = 351205417, upload-time = "2026-03-06T17:27:08.267Z" },
-]
-
-[[package]]
-name = "tensorflow-intel"
-version = "2.18.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "absl-py" },
-    { name = "astunparse" },
-    { name = "flatbuffers" },
-    { name = "gast" },
-    { name = "google-pasta" },
-    { name = "grpcio" },
-    { name = "h5py" },
-    { name = "keras", version = "3.14.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "libclang" },
-    { name = "ml-dtypes", version = "0.4.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "numpy" },
-    { name = "opt-einsum" },
-    { name = "packaging" },
-    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "requests" },
-    { name = "setuptools" },
-    { name = "six" },
-    { name = "tensorboard" },
-    { name = "termcolor" },
-    { name = "typing-extensions" },
-    { name = "wrapt" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b2/47/e1a7cc95eccaaa52f47c3de8fd81abcfce105979790892f52e745339f929/tensorflow_intel-2.18.0-cp310-cp310-win_amd64.whl", hash = "sha256:34701c988f3e20415a8e450a1384339e9f013950db70fa0361b79cddd1e8431b", size = 390026830, upload-time = "2024-10-25T04:46:05.615Z" },
-    { url = "https://files.pythonhosted.org/packages/76/ad/fa6c508a15ff79cb5409294c293388e0999b7d480f84b65e4287277434fe/tensorflow_intel-2.18.0-cp311-cp311-win_amd64.whl", hash = "sha256:af380d326e146f2d184a940ccf8350e9b6dc06a0530bfaa3a557b73819c4017b", size = 390215589, upload-time = "2024-10-25T04:46:19.839Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/4e/44ce609139065035c56fe570fe7f0ee8d06180c99a424bac588472052c5d/tensorflow_intel-2.18.0-cp312-cp312-win_amd64.whl", hash = "sha256:a5818043f565cf74179b67eb52fc060587ccecb9540141c39d84fbcb37ecff8c", size = 390262926, upload-time = "2024-10-25T04:46:35.62Z" },
 ]
 
 [[package]]

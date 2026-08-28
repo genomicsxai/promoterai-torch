@@ -50,8 +50,7 @@ Issues = "https://github.com/genomicsxai/promoterai-torch/issues"
 
 [project.optional-dependencies]
 convert = [
-    "tensorflow-cpu; sys_platform != 'darwin'",
-    "tensorflow; sys_platform == 'darwin'",
+    "tensorflow",
     "tf-keras",
 ]
 train = ["h5py>=3.0", "pybigtools>=0.2.5"]

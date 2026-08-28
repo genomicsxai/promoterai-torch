@@ -353,8 +353,8 @@ def convert_tf_weights(
         import tf_keras
     except ImportError:
         raise ImportError(
-            "tensorflow-cpu and tf-keras are required for weight conversion. "
-            "Install with: pip install tensorflow-cpu tf-keras"
+            "tensorflow and tf-keras are required for weight conversion. "
+            "Install with: pip install tensorflow tf-keras"
         )
 
     from promoterai_torch.architecture import PromoterAI

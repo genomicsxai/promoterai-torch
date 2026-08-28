@@ -54,7 +54,7 @@ jobs where both runtimes can coexist in GPU memory.
 
 Core install (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tqdm`. No TensorFlow dependency for inference.
 
-`[convert]` extra adds: `tensorflow-cpu` (Linux/Windows) or `tensorflow` (macOS), `tf-keras`. Required for `promoterai-torch convert`; downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints).
+`[convert]` extra adds: `tensorflow`, `tf-keras`. Required for `promoterai-torch convert`; downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints). Don't add a platform-conditional `tensorflow-cpu` variant here — `tf-keras` itself unconditionally requires plain `tensorflow`, so installing `tensorflow-cpu` alongside it pulls in both packages, which install conflicting builds of the same files (e.g. `tensorflow/libtensorflow_cc.so.2`) into the same site-packages path, producing an ABI-mismatched "undefined symbol" import error on Linux.
 
 `[train]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `pybigtools` (preprocessing). Required for `preprocess`, `train`, and `SequenceDataset`.
 

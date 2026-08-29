@@ -243,6 +243,9 @@ def run_single_step(
     x_pt = torch.from_numpy(x_np).to(torch_device)
     y_pt_list = [torch.from_numpy(y).to(torch_device) for y in y_np]
     preds_pt = pt_model(x_pt)  # tuple, one per head; updates BN stats as a side effect
+    pred_names = [f"head{j}" for j in range(len(preds_pt))]
+    preds_pt_np = {n: p.detach().cpu().numpy() for n, p in zip(pred_names, preds_pt)}
+    preds_keras_np = {n: p.numpy() for n, p in zip(pred_names, pred_list)}
     loss_pt = sum(
         w * torch.nn.functional.mse_loss(
             p, y if y.shape[-1] != 1 else torch.zeros_like(p)
@@ -282,6 +285,7 @@ def run_single_step(
     return {
         "loss_pt": float(loss_pt.item()),
         "loss_keras": float(keras_loss.numpy()),
+        "prediction": compare_all(preds_pt_np, preds_keras_np),
         "raw_grad": compare_all(raw_grads_pt_np, mapped(raw_grads_keras)),
         "clipped_grad": compare_all(clipped_grads_pt_np, mapped(clipped_grads_keras)),
         "param_delta": compare_all(param_deltas_pt, mapped(param_deltas_keras)),

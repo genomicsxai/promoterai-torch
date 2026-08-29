@@ -65,7 +65,7 @@ through 8, per alphagenome-pytorch's tests/README.md tolerance notes.
 import numpy as np
 import pytest
 
-from tests.gradient_comparison_utils import assert_pass_rate
+from tests.gradient_comparison_utils import assert_pass_rate, report_top_offenders
 from tests.keras_pytorch_step import force_tf_cpu, run_single_step
 
 pytest.importorskip("tf_keras", reason="tf-keras not installed")
@@ -140,6 +140,12 @@ def test_real_checkpoint_single_step_gradient_equivalence(
         )
 
         suffix = f" (head {active_idx}/{len(output_dims)} active)"
+
+        # Printed unconditionally (run with -s) so a forward-loss mismatch below is
+        # immediately localized to "predictions genuinely diverge at this scale" vs.
+        # "something upstream of the loss is wrong" -- see report_top_offenders.
+        print(f"\n[diagnostic] per-head prediction agreement{suffix}:")
+        print(report_top_offenders(results["prediction"], k=len(results["prediction"])))
 
         # --- 1. Forward loss ---
         np.testing.assert_allclose(

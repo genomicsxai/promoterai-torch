@@ -89,7 +89,10 @@ if triton is not None:
         BLOCK_L: tl.constexpr,
         HAS_BIAS: tl.constexpr,
     ):
-        # x, y: (N, C, L) contiguous. w: (C, K) contiguous.
+        # x, y: (N, C, L) contiguous -- L is the fastest-varying axis, so every
+        # tile below is (BLOCK_C, BLOCK_L) with L trailing, matching that layout
+        # for coalesced access (a (BLOCK_L, BLOCK_C) tile would instead vectorize
+        # over the strided C axis -- ~15-20x slower, measured).
         pid_n = tl.program_id(0)
         pid_l = tl.program_id(1)
         offs_c = tl.arange(0, BLOCK_C)
@@ -103,26 +106,26 @@ if triton is not None:
 
         offs_l = pid_l * BLOCK_L + tl.arange(0, BLOCK_L)
         mask_l = offs_l < L
-        acc = tl.zeros((BLOCK_L, BLOCK_C), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_C, BLOCK_L), dtype=tl.float32)
 
         for k in tl.static_range(K):
-            in_l = offs_l[:, None] + (k * dilation - pad_left)
-            mask = mask_l[:, None] & mask_c[None, :] & (in_l >= 0) & (in_l < L)
+            in_l = offs_l[None, :] + (k * dilation - pad_left)
+            mask = mask_c[:, None] & mask_l[None, :] & (in_l >= 0) & (in_l < L)
             x_val = tl.load(
-                x_base + offs_c[None, :] * L + in_l, mask=mask, other=0.0
+                x_base + offs_c[:, None] * L + in_l, mask=mask, other=0.0
             ).to(tl.float32)
             w_val = tl.load(
-                w_ptr + offs_c[None, :] * K + k, mask=mask_c[None, :], other=0.0
+                w_ptr + offs_c[:, None] * K + k, mask=mask_c[:, None], other=0.0
             ).to(tl.float32)
             acc += x_val * w_val
 
         if HAS_BIAS:
-            acc += bias[None, :]
+            acc += bias[:, None]
 
         tl.store(
-            y_base + offs_c[None, :] * L + offs_l[:, None],
+            y_base + offs_c[:, None] * L + offs_l[None, :],
             acc,
-            mask=mask_l[:, None] & mask_c[None, :],
+            mask=mask_c[:, None] & mask_l[None, :],
         )
 
     @triton.autotune(configs=_autotune_configs(), key=["C", "L", "K"])
@@ -145,7 +148,8 @@ if triton is not None:
         BLOCK_L: tl.constexpr,
         HAS_BIAS: tl.constexpr,
     ):
-        # dy, x, dx: (N, C, L) contiguous. w: (C, K).
+        # dy, x, dx: (N, C, L) contiguous -- L trailing in every tile, same
+        # coalescing reason as the forward kernel.
         # dw: (N*num_l_blocks, K, C). dbias: (N*num_l_blocks, C) -- each (n, l_block)
         # program owns an exclusive partial slot (no atomics needed), reduced over
         # the combined (n, l_block) axis on the host afterward, the same way the
@@ -163,44 +167,44 @@ if triton is not None:
         mask_m = offs_m < L
 
         # dX[m] = sum_k w[k] * dY[m + pad_left - k*dilation]
-        dx_acc = tl.zeros((BLOCK_L, BLOCK_C), dtype=tl.float32)
+        dx_acc = tl.zeros((BLOCK_C, BLOCK_L), dtype=tl.float32)
         for k in tl.static_range(K):
-            in_l = offs_m[:, None] + (pad_left - k * dilation)
-            mask = mask_m[:, None] & mask_c[None, :] & (in_l >= 0) & (in_l < L)
+            in_l = offs_m[None, :] + (pad_left - k * dilation)
+            mask = mask_c[:, None] & mask_m[None, :] & (in_l >= 0) & (in_l < L)
             dy_val = tl.load(
-                dy_base + offs_c[None, :] * L + in_l, mask=mask, other=0.0
+                dy_base + offs_c[:, None] * L + in_l, mask=mask, other=0.0
             ).to(tl.float32)
             w_val = tl.load(
-                w_ptr + offs_c[None, :] * K + k, mask=mask_c[None, :], other=0.0
+                w_ptr + offs_c[:, None] * K + k, mask=mask_c[:, None], other=0.0
             ).to(tl.float32)
             dx_acc += dy_val * w_val
 
         tl.store(
-            dx_base + offs_c[None, :] * L + offs_m[:, None],
+            dx_base + offs_c[:, None] * L + offs_m[None, :],
             dx_acc,
-            mask=mask_m[:, None] & mask_c[None, :],
+            mask=mask_c[:, None] & mask_m[None, :],
         )
 
         # dW[k] = sum_l dY[l] * X[l + k*dilation - pad_left], partial over this
         # L-block only; dbias = sum_l dY[l], same partial treatment.
         dy_val = tl.load(
-            dy_base + offs_c[None, :] * L + offs_m[:, None],
-            mask=mask_m[:, None] & mask_c[None, :],
+            dy_base + offs_c[:, None] * L + offs_m[None, :],
+            mask=mask_c[:, None] & mask_m[None, :],
             other=0.0,
         ).to(tl.float32)
 
         slot = pid_n * num_l_blocks + pid_l
         for k in tl.static_range(K):
-            in_l = offs_m[:, None] + (k * dilation - pad_left)
-            mask = mask_m[:, None] & mask_c[None, :] & (in_l >= 0) & (in_l < L)
+            in_l = offs_m[None, :] + (k * dilation - pad_left)
+            mask = mask_c[:, None] & mask_m[None, :] & (in_l >= 0) & (in_l < L)
             x_val = tl.load(
-                x_base + offs_c[None, :] * L + in_l, mask=mask, other=0.0
+                x_base + offs_c[:, None] * L + in_l, mask=mask, other=0.0
             ).to(tl.float32)
-            dw_k = tl.sum(dy_val * x_val, axis=0)
+            dw_k = tl.sum(dy_val * x_val, axis=1)
             tl.store(dw_ptr + slot * (K * C) + k * C + offs_c, dw_k, mask=mask_c)
 
         if HAS_BIAS:
-            dbias_partial = tl.sum(dy_val, axis=0)
+            dbias_partial = tl.sum(dy_val, axis=1)
             tl.store(dbias_ptr + slot * C + offs_c, dbias_partial, mask=mask_c)
 
 

@@ -513,6 +513,7 @@ def convert_tf_weights(
         "output_dims": output_dims,
         "output_crop": output_crop,
         "shortcut_layer_freq": shortcut_layer_freq,
+        "species_order": species_order,
     }
     if input_length is not None:
         args_dict["input_length"] = input_length

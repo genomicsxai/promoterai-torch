@@ -256,7 +256,7 @@ def test_validation_dataloader_is_sequential_without_replacement():
     assert loader.sampler is None or not hasattr(loader.sampler, "replacement")
 
 
-def test_rank_local_weighted_sampler_uses_equal_sample_counts():
+def test_rank_local_weighted_sampler_uses_equal_batch_counts():
     loader0 = build_weighted_dataloader(
         [_IndexDataset(0, 2), _IndexDataset(2, 4)],
         batch_size=2,
@@ -274,5 +274,37 @@ def test_rank_local_weighted_sampler_uses_equal_sample_counts():
         num_samples=7,
     )
 
-    assert loader0.sampler.num_samples == 7
-    assert loader1.sampler.num_samples == 7
+    assert loader0.batch_sampler.num_batches == 7 // 2
+    assert loader1.batch_sampler.num_batches == 7 // 2
+
+
+def test_multi_species_batches_are_species_homogeneous(tmp_path):
+    """Regression test: a batch must never mix species (would crash the
+
+    default collate_fn once species have different real output shapes),
+    matching Illumina's per-batch-homogeneous sample_from_datasets scheme.
+    """
+    h5py = _require_h5py()
+    num_species = 2
+    datasets = []
+    for j, n_tracks in enumerate((3, 5)):
+        h5_path = tmp_path / f"species{j}.h5"
+        with h5py.File(h5_path, "w") as handle:
+            handle.create_dataset("x", data=np.ones((10, 40, 4), dtype="float32"))
+            handle.create_dataset(
+                "y", data=np.zeros((10, 20, n_tracks), dtype="float32")
+            )
+        sw = tuple(k == j for k in range(num_species))
+        datasets.append(
+            SequenceDataset([str(h5_path)], 40, 20, sw, augment=False)
+        )
+
+    loader = build_weighted_dataloader(
+        datasets, batch_size=4, num_workers=0, num_samples=40
+    )
+
+    for _, _, w_tuple in loader:
+        active_species = w_tuple > 0
+        # exactly one species active per row, and the same one for every row
+        assert active_species.sum(dim=1).eq(1).all()
+        assert (active_species == active_species[0]).all()

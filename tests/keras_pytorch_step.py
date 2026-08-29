@@ -34,30 +34,44 @@ def force_tf_cpu() -> None:
     tf.config.set_visible_devices([], "GPU")
 
 
-def normalize_keras_outputs(pred) -> tuple[list, tuple | None]:
+def normalize_keras_outputs(
+    pred, species_order: tuple | None = None
+) -> tuple[list, tuple | None]:
     """Return (every species head's output tensor, that head's species name if known),
-    in a stable human/hg38-first, mouse/mm10-second order (mirrors track_parity_utils.py's
-    outputs_in_stable_order).
+    ordered to line up positionally with the PyTorch side's output_heads.
 
     Multi-species Keras functional models (e.g. human+mouse) return a dict keyed by
-    species name rather than a plain tensor/tuple; the dict's own keys are ground
-    truth for species names (needed to align keras_tensors_to_pt's shortcut_{species}{N}
-    weight lookups), so they're returned too rather than relying on a caller-supplied
-    guess. The PyTorch side's tuple output has no such names -- it's always ordered to
-    match convert_tf_weights' species_order (itself human/hg38-first by the convention
-    AGENTS.md documents), so sorting the dict the same way lines the two sides' heads up
-    one-to-one positionally regardless.
+    species name rather than a plain tensor/tuple. The PyTorch side's tuple output has
+    no such names -- its head order is convert_tf_weights' species_order, i.e. the
+    *first-appearance order of shortcut_{species}{N} weights in the SavedModel's own
+    weight list*, which is not necessarily human/hg38-first (that's only a convention
+    AGENTS.md documents for authoring new checkpoints, not something convert_tf_weights
+    enforces). Passing that real species_order in (from load_pretrained's checkpoint
+    args) is therefore the only reliable way to line the two sides' heads up -- a
+    human/mouse name heuristic on the dict's own keys can silently pick a different
+    order than what convert_tf_weights actually used, aligning the wrong head's
+    prediction/target pair without any shape mismatch to catch it.
+
+    Falls back to the human/hg38-first heuristic only when no species_order is given,
+    or it doesn't match the dict's actual key set (e.g. a checkpoint converted before
+    species_order was recorded).
     """
     if isinstance(pred, dict):
-        def _rank(key):
-            key_str = str(key).lower()
-            if "human" in key_str or "hg38" in key_str:
-                return (0, key_str)
-            if "mouse" in key_str or "mm10" in key_str:
-                return (1, key_str)
-            return (2, key_str)
+        if species_order is not None and set(map(str, pred)) == set(
+            map(str, species_order)
+        ):
+            key_by_str = {str(k): k for k in pred}
+            ordered_keys = [key_by_str[str(s)] for s in species_order]
+        else:
+            def _rank(key):
+                key_str = str(key).lower()
+                if "human" in key_str or "hg38" in key_str:
+                    return (0, key_str)
+                if "mouse" in key_str or "mm10" in key_str:
+                    return (1, key_str)
+                return (2, key_str)
 
-        ordered_keys = sorted(pred, key=_rank)
+            ordered_keys = sorted(pred, key=_rank)
         return [pred[k] for k in ordered_keys], tuple(str(k) for k in ordered_keys)
     if isinstance(pred, (list, tuple)):
         return list(pred), None
@@ -128,6 +142,7 @@ def run_single_step(
     clip_norm: float,
     device: str = "cpu",
     species: tuple = ("human",),
+    species_order: tuple | None = None,
     tiny_eps: float = 1e-10,
     weights: list | None = None,
 ) -> dict:
@@ -140,7 +155,12 @@ def run_single_step(
     (bias correction, decoupled weight decay) agree regardless of that quirk.
 
     y_np is one target array per output head, in the same order as pred_pt's tuple
-    (and the Keras dict once stable-sorted -- see normalize_keras_outputs). weights is
+    (and the Keras dict once ordered by species_order -- see normalize_keras_outputs).
+    species_order should be the ground-truth order from load_pretrained's checkpoint
+    args (convert_tf_weights' species_order), so the Keras dict's per-species outputs
+    line up positionally with pred_pt's tuple and with keras_tensors_to_pt's
+    shortcut_{species}{N} weight lookups -- required for any multi-species real
+    checkpoint, where species_order need not be human/hg38-first. weights is
     one scalar per head (default: all 1.0), mirroring train.py's compute_loss w_tuple /
     dataset.py's sample_weight: a species not in this batch gets weight 0.0, zeroing
     both its loss contribution and (via the chain rule) its gradient, while a head
@@ -168,7 +188,7 @@ def run_single_step(
     head_weights = weights if weights is not None else [1.0] * len(y_np)
     with tf.GradientTape() as tape:
         pred = keras_model(x_tf, training=True)  # updates BN running stats as a side effect
-        pred_list, derived_species = normalize_keras_outputs(pred)
+        pred_list, derived_species = normalize_keras_outputs(pred, species_order)
         # Mirrors train.py's compute_loss / dataset.py's _prepare_sample exactly: the
         # weight (not the dummy target) is what zeroes an inactive species' loss value
         # and, via the chain rule, its gradient -- the target substitution below is only
@@ -184,7 +204,7 @@ def run_single_step(
         ]
         keras_loss = tf.add_n(losses)
 
-    effective_species = derived_species if derived_species is not None else species
+    effective_species = derived_species if derived_species is not None else (species_order or species)
 
     def mapped(tensors):
         return keras_tensors_to_pt(tensors, num_blocks, shortcut_nums_desc, effective_species)

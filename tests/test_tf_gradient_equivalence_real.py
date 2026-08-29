@@ -97,6 +97,9 @@ def test_real_checkpoint_single_step_gradient_equivalence(
     shortcut_layer_freq = args.get("shortcut_layer_freq", 4)
     shortcut_nums_desc = list(range(num_blocks, 0, -shortcut_layer_freq))
     output_dims = args["output_dims"]
+    # Ground truth from convert_tf_weights: the exact order output_heads was built
+    # in, which need not be human/hg38-first -- see normalize_keras_outputs.
+    species_order = tuple(args["species_order"])
 
     rng = np.random.default_rng(0)
     idx = rng.integers(0, 4, size=(gradient_batch_size, gradient_input_length))
@@ -133,6 +136,7 @@ def test_real_checkpoint_single_step_gradient_equivalence(
             clip_norm=clip_norm,
             device=gradient_device,
             weights=weights,
+            species_order=species_order,
         )
 
         suffix = f" (head {active_idx}/{len(output_dims)} active)"

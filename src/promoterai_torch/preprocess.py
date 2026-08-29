@@ -117,6 +117,7 @@ def preprocess_chrom(
 
     half_in = input_length // 2
     half_out = output_length // 2
+    n_tracks = len(bws_fwd)
 
     os.makedirs(hdf5_folder, exist_ok=True)
     hdf5_path = os.path.join(hdf5_folder, f"{chrom}.h5")
@@ -148,6 +149,15 @@ def preprocess_chrom(
 
         seq_str = str(fasta[chrom][pos - half_in : pos + half_in]).upper()
         if len(seq_str) < input_length:
+            # Too close to a chromosome edge for a full window. Illumina's
+            # generator.py keeps this TSS as an all-zero row (rather than
+            # dropping it) so it stays in the dataset and gets zero-weighted
+            # downstream via _prepare_sample's x.max()==0 check; mirror that
+            # instead of shrinking the dataset and skewing per-species sizes.
+            xs_buf.append(np.zeros((input_length, 4), dtype="float32"))
+            ys_buf.append(np.zeros((output_length, n_tracks), dtype="float32"))
+            if len(xs_buf) >= chunk_size:
+                flush()
             continue
         x = onehot_encode(seq_str)
 

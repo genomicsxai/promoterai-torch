@@ -124,6 +124,90 @@ unconditionally. See `test_compute_loss_keeps_dummy_species_in_gradient_graph` i
 cross-framework (including that the inactive head's parameters change identically on
 both sides, whatever that change rounds to).
 
+## Multi-species batches must be species-homogeneous (`src/promoterai_torch/dataset.py`)
+
+Illumina's `train.py` combines per-species `tf.data` streams with
+`tf.data.Dataset.sample_from_datasets([ds.repeat() for ds in datasets], weights=...)`,
+where each per-species stream is already `.batch(batch_size)`'d
+(`tfrecords.py`'s `make_dataset`) *before* being combined. That means
+`sample_from_datasets` picks one whole batch from one species at a time --
+every training batch is single-species, never a mix.
+
+`build_weighted_dataloader` originally combined all species into one
+`ConcatDataset` and drew individual **rows** from a single
+`WeightedRandomSampler` over the whole thing, so a batch could (and, with
+`replacement=True` sampling, almost always did) mix rows from different
+species. Since each species dataset returns a real-shaped target for its own
+head and a `(1, 1)` dummy placeholder for every other head (see the soft-zero
+section below), mixing species within a batch means the same tuple position
+holds different shapes across rows in that batch -- `torch.stack` in the
+default `collate_fn` then crashes outright:
+
+```
+RuntimeError: stack expects each tensor to be equal size, but got [50, 5] at entry 0 and [1, 1] at entry 5
+```
+
+So multi-species training (any run with `--hdf5_nonhuman_folders` set)
+crashed on essentially its first batch -- this made the soft-zero
+`compute_loss` fix below unreachable in practice, since no mixed-species
+batch ever survived collation to reach it.
+
+Fixed with `_SpeciesBatchSampler`, a batch-level sampler that picks one
+species per batch (weighted by that species' dataset size, matching the old
+per-row weighting exactly since `batch_size` is the same constant across
+species) and draws the whole batch's indices from only that species. See
+`test_multi_species_batches_are_species_homogeneous` in `tests/test_dataset.py`.
+
+## Boundary TSS rows should stay in the dataset as zero rows, not be dropped (`src/promoterai_torch/preprocess.py`)
+
+Illumina's `generator.py` pre-allocates a row per TSS and, when a TSS is too
+close to a chromosome edge for a full window (`len(seq) < input_length`),
+`continue`s without filling it in -- the row stays in the dataset as an
+all-zero row, which `_prepare_sample`'s `x.max() == 0` check later
+zero-weights (same mechanism as the multi-species dummy-target case above).
+
+`preprocess_chrom` instead used a hard `continue` that skipped appending the
+row entirely, silently shrinking that chromosome's sample count. Low
+severity (only affects a handful of near-edge TSS, and only shifts
+`steps_per_epoch`/inter-species sampling ratios slightly) but still a real
+fidelity gap, and it made the `x_crop.max() == 0` masking path in
+`_prepare_sample` dead code in practice for real HDF5-backed data. Fixed by
+appending an explicit all-zero `(input_length, 4)` / `(output_length,
+n_tracks)` row instead of skipping it -- see
+`test_preprocess_keeps_boundary_tss_as_zero_row_matching_tf_generator` in
+`tests/test_preprocess.py`.
+
+## Cross-framework test harness must use convert_tf_weights' real species_order, not a name heuristic (`tests/keras_pytorch_step.py`)
+
+`tests/test_tf_gradient_equivalence_real.py`'s first run against a real
+human+mouse checkpoint produced a forward-pass loss mismatch far outside
+floating-point noise (`loss_pt=43.76` vs `loss_keras=101.31`, head 0 active).
+Root cause: `normalize_keras_outputs` ordered a multi-species Keras model's
+output dict by a "human/hg38-first, mouse/mm10-second" name heuristic on the
+dict's own keys, but `convert_tf_weights`' `species_order` (which actually
+determines `output_heads`' index order in the converted PyTorch model) is
+just the *first-appearance order of `shortcut_{species}{N}` weights in the
+SavedModel's own weight list* -- not necessarily human-first. AGENTS.md's
+species-ordering convention is a guideline for authoring new checkpoints,
+not something `convert_tf_weights` enforces or could enforce (it only reads
+whatever order the SavedModel's weights happen to be in).
+
+When the heuristic's guessed order didn't match `species_order`, the test
+paired PyTorch's head 0 (species A) prediction/target against Keras' head 0
+under the heuristic's ordering (species B) -- a comparison between two
+unrelated heads, not a numerical-precision issue, hence the large mismatch
+with no shape error to catch it (both heads' predictions/targets are
+shape-compatible, just semantically different species).
+
+Fixed by having `convert_tf_weights` save `species_order` into the
+checkpoint's `args` dict, and `normalize_keras_outputs`/`run_single_step`
+prefer that ground truth (via a new `species_order` parameter) over the name
+heuristic, falling back to the heuristic only when no `species_order` is
+given or it doesn't match the dict's actual keys (e.g. a checkpoint
+converted before this fix). See `tests/test_keras_pytorch_step.py` and
+`test_convert_multi_species`'s `species_order` assertion in
+`tests/test_convert.py`.
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

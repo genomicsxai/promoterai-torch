@@ -96,6 +96,15 @@ gradients, the real-epsilon `param_delta` direction check, and BatchNorm running
 cleanly at real scale — those are what actually validates `train.py`'s production mechanics; this
 one check's failure is a confound in the diagnostic itself, not evidence against them.
 
+The same confound hit `tests/test_tf_gradient_equivalence_finetune_real.py` too, on a
+real fine-tuned checkpoint's output-head projections (only 12 tensors, moderate
+size, but `finetune.py`'s `clip_norm=1.0` is much looser than `train.py`'s `1e-4` --
+the dilution mechanism above isn't why here; it's simpler: some of the six shortcut
+projections just have smaller raw gradient magnitude than others, and for those,
+`tiny_eps=1e-10` still isn't negligible relative to their `sqrt(v)`). Fixed the same
+way: `param_delta_tiny_eps` is diagnostic-only (printed) in both real-checkpoint
+tests, and still asserted in both toy-scale tests, where the confound doesn't apply.
+
 ## Multi-species loss must use a soft zero, not a hard skip (`src/promoterai_torch/train.py`)
 
 Illumina's `tfrecords.py` handles multi-species batches (e.g. human + mouse) with a

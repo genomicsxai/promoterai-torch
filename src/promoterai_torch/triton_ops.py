@@ -65,16 +65,26 @@ def triton_dw_conv_supported(device_type: str, device_index: int | None) -> bool
 
 # Fixed, not autotuned -- see the module docstring for why (backward's partial
 # dW/dbias buffers are shaped by cdiv(L, _BLOCK_L)). Matches cherimoya's choice.
-_BLOCK_L = 64
+#
+# (64, 128) was chosen empirically via examples/sweep_dw_conv_blocks.py over a
+# grid of alternatives (an NVIDIA L40S, model_dim=1024, seq_len=20480): it wins
+# consistently at both mid and high dilation, though only marginally (~0.5%,
+# within noise) over the next-best combos -- the real win versus the original,
+# unparallelized kernel was fixing register pressure (see _BLOCK_C below), not
+# this tuning pass. Some combos are much worse, not just slower: block_c=512
+# with block_l=64 is fine on forward but blows up backward to 4-9x every other
+# combo's time, since backward's kernel (dx and dw/dbias together) hits
+# resource limits at a smaller block size than forward's alone does.
+_BLOCK_L = 128
 
 # Also fixed, and for a second, independent reason: BLOCK_C used to cover the
 # *entire* channel width in one program (next_power_of_2(C) = 1024 for the real
-# model). Combined with BLOCK_L=64, that's a 1024x64 = 65536-element accumulator
-# tile -- at num_warps=8 (256 threads), 256 registers/thread for that one array
-# alone, already past the 255/thread hardware limit before counting anything
-# else live in the kernel. Splitting C across the grid too keeps each program's
-# working set small enough to actually fit in registers.
-_BLOCK_C = 128
+# model). Combined with the old BLOCK_L=64, that was a 1024x64 = 65536-element
+# accumulator tile -- at num_warps=8 (256 threads), 256 registers/thread for
+# that one array alone, already past the 255/thread hardware limit before
+# counting anything else live in the kernel. Splitting C across the grid too
+# keeps each program's working set small enough to actually fit in registers.
+_BLOCK_C = 64
 
 
 def _autotune_configs():

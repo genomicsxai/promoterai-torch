@@ -2,6 +2,83 @@
 
 Key decisions and fixes made during the initial port and validation of promoterai-torch.
 
+## Triton dw_conv kernel: three real bottlenecks, one red herring (`src/promoterai_torch/triton_ops.py`)
+
+An opt-in fused Triton kernel (`dw_conv_backend="triton"`/`"auto"` on
+`MetaFormerBlock`/`PromoterAI`) replaces `nn.Conv1d`'s grouped-conv path for the
+token-mixing depthwise dilated conv. It was written with no GPU available in
+dev, then benchmarked on a real GPU (NVIDIA L40S) against `nn.Conv1d` at real
+scale (`model_dim=1024, seq_len=20480`) via `examples/benchmark_dw_conv.py`.
+Debugging that gap took several rounds; two were real fixes, one was a wrong
+guess that happened to be harmless:
+
+1. **Grid too coarse (real bottleneck).** The kernel originally launched a
+   `(N,)` grid -- one program per batch element, looping over the whole
+   `(C, L)` slice internally. At real training batch sizes (2-8), that's far
+   fewer programs than a GPU has SMs. Fixed by splitting the sequence-length
+   axis across the grid too: `(N, num_l_blocks)`, modeled on
+   [jmschrei/cherimoya](https://github.com/jmschrei/cherimoya)'s `cheri.py` (a
+   sibling fused dilated-depthwise-conv kernel, referenced while building this
+   one, available locally as the `cherimoya` skill). Cherimoya fixes its own
+   L-block size as a plain constant rather than autotuning it, for a specific
+   reason that applies here too: the backward pass's dW/dbias
+   partial-reduction buffers are shaped by `num_l_blocks = cdiv(L, BLOCK_L)`,
+   and Triton's autotune model allocates output buffers once, before any
+   trial config runs -- if BLOCK_L varied per trial, that buffer's shape would
+   need to too, which doesn't work. This alone didn't fix the timing (see next
+   point) but was necessary.
+
+2. **Wrong guess: memory coalescing (harmless, not the bottleneck).** After
+   (1), the kernel was still ~15-20x *slower* than `nn.Conv1d`. Working
+   hypothesis: tensors are `(N, C, L)` contiguous (L fastest-varying, matches
+   PyTorch's `Conv1d` convention), but every load/store tile was shaped
+   `(BLOCK_L, BLOCK_C)` with the strided `C` axis trailing -- Triton maps
+   threads contiguously along a tile's trailing axis, so this looked like
+   textbook uncoalesced access. Swapped every tile to `(BLOCK_C, BLOCK_L)`,
+   `L` trailing. **This produced no measured change at all** -- Triton's
+   compiler evidently reasons about the actual pointer/stride expressions, not
+   which axis is trailing in the Python-level `tl.zeros`/`tl.arange` calls, so
+   the swap likely compiled to equivalent code either way. Left in (it's not
+   wrong, just not the fix), but the lesson is to distrust a plausible-sounding
+   theory that isn't backed by before/after numbers.
+
+3. **Register pressure (the real bottleneck).** `BLOCK_C` covered the *entire*
+   channel width in one program (`next_power_of_2(C)` = 1024 for the real
+   model). Combined with `BLOCK_L=64`, each program's accumulator tile was
+   `1024 x 64 = 65536` float32 elements -- at `num_warps=8` (256 threads), 256
+   registers/thread for that one array alone, already past the hardware's
+   255-register/thread limit before counting anything else live in the
+   kernel. A concrete, checkable hypothesis (arithmetic against a hard
+   hardware limit), unlike (2). Fixed by splitting `C` across the grid too,
+   with a small fixed `_BLOCK_C`, mirroring the same fixed-not-autotuned
+   reasoning as `_BLOCK_L`: grid becomes `(N, num_c_blocks, num_l_blocks)`.
+   This took the kernel from ~15-20x slower to roughly parity with
+   `nn.Conv1d` at low-to-mid dilation.
+
+4. **Block-size tuning: diminishing returns.** With grid parallelism and
+   register pressure fixed, `block_c`/`block_l` were exposed as overridable
+   parameters on `depthwise_dilated_conv1d_triton` (defaults unchanged for
+   `MetaFormerBlock`) and swept empirically via
+   `examples/sweep_dw_conv_blocks.py` rather than guessed further. `(64, 128)`
+   won consistently at both mid and high dilation, but only marginally (~0.5%,
+   within noise) over the next-best combos -- confirming (3) was the real fix
+   and this pass is just a tie-breaker. One combo (`block_c=512, block_l=64`)
+   is worth noting as a trap: fine on forward, but blows up backward to
+   4-9x every other combo's time, since backward's kernel (dx and dw/dbias
+   together) hits resource limits at a smaller block size than forward alone.
+   Shared-memory limits also bound the search: any combo needing
+   `block_c * block_l * 4` bytes over the GPU's shared-memory-per-SM limit
+   (~99KB on the L40S tested) fails outright rather than just running slower.
+
+Remaining performance is genuine parity with `nn.Conv1d`/cuDNN's grouped-conv
+path, not a clear win, and it regresses somewhat at dilation >=512 (only ~4 of
+the 24 real blocks reach that dilation) -- plausibly reduced cache locality
+once the `K=5` taps spread far enough apart in memory that they stop sharing
+cache lines, though this hasn't been confirmed the way (1) and (3) were.
+Squeezing past parity would need a different kernel design, not more
+block-size tuning, and hasn't been pursued further given cuDNN's grouped-conv
+is already a mature, heavily-optimized baseline to match.
+
 ## Weight converter (`src/promoterai_torch/utils.py`)
 
 Single-species Keras models name output head weights `shortcut{N}/kernel` (no species prefix), while multi-species models use `shortcut_{species}{N}/kernel`. The converter now handles both:

@@ -270,6 +270,33 @@ a fine-tuned checkpoint if you have it) -- the two tests are not
 interchangeable, and pointing either at the wrong kind of checkpoint will
 produce a spurious mismatch that looks like a porting bug but isn't.
 
+## cosine_threshold=1.0 is the wrong tool for asserting "nothing changed"
+
+`tests/test_tf_gradient_equivalence_finetune_real.py`'s frozen-backbone check
+(`bn_unchanged_keras`/`bn_unchanged_pt`) originally used `assert_pass_rate`
+with `cosine_threshold=1.0, rel_l2_tol=1e-9` -- and failed on a real
+fine-tuned checkpoint, with ~26% of 96 backbone BatchNorm tensors "failing"
+despite the printed top offenders all showing `cosine=1.0000, rel_l2=0.0000%,
+max_diff=0` (i.e. displaying identically to the tensors that passed).
+
+Root cause: cosine similarity is computed via `dot(a, b) / (norm(a) *
+norm(b))`, which involves a `sqrt` and a division -- `sqrt(x)**2` doesn't
+always exactly recover `x` in floating point, so even two **bit-identical**
+arrays can compute to a cosine of `0.999999999999998` or `1.0000000000000002`
+depending on which way that ~1e-16-level rounding happens to fall. A
+`cosine_threshold=1.0` pass-rate check is therefore inherently, spuriously
+flaky in either direction, regardless of whether anything actually changed --
+`assert_pass_rate`/cosine similarity is designed for "are two *different*
+frameworks' outputs reasonably close," not "are these two snapshots exactly
+identical."
+
+Fixed with a new `assert_exact_match` in `tests/gradient_comparison_utils.py`,
+which checks `max_abs_diff == 0` directly (a field `ComparisonResult` already
+computes) instead of going through cosine/rel_l2 at all. Use this whenever
+asserting a buffer was untouched (e.g. a frozen BatchNorm running stat); keep
+`assert_pass_rate` for comparing two frameworks' genuinely-independent
+computations.
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

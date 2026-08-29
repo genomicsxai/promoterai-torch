@@ -47,7 +47,7 @@ and the model's real predictions).
 import numpy as np
 import pytest
 
-from tests.gradient_comparison_utils import assert_pass_rate
+from tests.gradient_comparison_utils import assert_exact_match, assert_pass_rate
 from tests.keras_pytorch_step import force_tf_cpu, run_single_finetune_step
 
 pytest.importorskip("tf_keras", reason="tf-keras not installed")
@@ -151,13 +151,11 @@ def test_real_finetune_checkpoint_single_step_gradient_equivalence(
     )
 
     # --- 5. Frozen backbone must not move at all, on either side ---
-    assert_pass_rate(
-        results["bn_unchanged_keras"], cosine_threshold=1.0, rel_l2_tol=1e-9,
-        min_pass_rate=1.0,
+    assert_exact_match(
+        results["bn_unchanged_keras"],
         label="Keras backbone BatchNorm running stats changed despite being frozen",
     )
-    assert_pass_rate(
-        results["bn_unchanged_pt"], cosine_threshold=1.0, rel_l2_tol=1e-9,
-        min_pass_rate=1.0,
+    assert_exact_match(
+        results["bn_unchanged_pt"],
         label="PyTorch backbone BatchNorm running stats changed despite TwinModel.eval()",
     )

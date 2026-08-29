@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 Time the fused Triton depthwise-dilated-conv1d kernel against nn.Conv1d on GPU.
 
@@ -22,7 +21,10 @@ import time
 import torch
 
 from promoterai_torch.architecture import _dilation_rate
-from promoterai_torch.triton_ops import depthwise_dilated_conv1d_triton, triton_dw_conv_supported
+from promoterai_torch.triton_ops import (
+    depthwise_dilated_conv1d_triton,
+    triton_dw_conv_supported,
+)
 
 
 def _time_ms(fn, num_warmup: int, num_iters: int) -> float:

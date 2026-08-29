@@ -234,14 +234,14 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, weight2d, bias, dilation):
+    def forward(ctx, x, weight2d, bias, dilation, block_c, block_l):
         # x: (N, C, L) contiguous. weight2d: (C, K) contiguous. bias: (C,) or None.
         N, C, L = x.shape
         K = weight2d.shape[1]
         pad_left = dilation * (K - 1) // 2
         has_bias = bias is not None
-        num_c_blocks = triton.cdiv(C, _BLOCK_C)
-        num_l_blocks = triton.cdiv(L, _BLOCK_L)
+        num_c_blocks = triton.cdiv(C, block_c)
+        num_l_blocks = triton.cdiv(L, block_l)
 
         y = torch.empty_like(x)
         _dw_conv1d_fwd_kernel[(N, num_c_blocks, num_l_blocks)](
@@ -255,8 +255,8 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
             L=L,
             C=C,
             K=K,
-            BLOCK_C=_BLOCK_C,
-            BLOCK_L=_BLOCK_L,
+            BLOCK_C=block_c,
+            BLOCK_L=block_l,
             HAS_BIAS=has_bias,
         )
 
@@ -264,6 +264,8 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
         ctx.dilation = dilation
         ctx.pad_left = pad_left
         ctx.has_bias = has_bias
+        ctx.block_c = block_c
+        ctx.block_l = block_l
         return y
 
     @staticmethod
@@ -272,8 +274,9 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
         N, C, L = x.shape
         K = weight2d.shape[1]
         dy = dy.contiguous()
-        num_c_blocks = triton.cdiv(C, _BLOCK_C)
-        num_l_blocks = triton.cdiv(L, _BLOCK_L)
+        block_c, block_l = ctx.block_c, ctx.block_l
+        num_c_blocks = triton.cdiv(C, block_c)
+        num_l_blocks = triton.cdiv(L, block_l)
 
         dx = torch.empty_like(x)
         dw_partial = torch.empty(
@@ -299,24 +302,37 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
             L=L,
             C=C,
             K=K,
-            BLOCK_C=_BLOCK_C,
-            BLOCK_L=_BLOCK_L,
+            BLOCK_C=block_c,
+            BLOCK_L=block_l,
             HAS_BIAS=ctx.has_bias,
         )
 
         dw = dw_partial.sum(dim=0).transpose(0, 1).contiguous().to(weight2d.dtype)
         dbias = dbias_partial.sum(dim=0).to(weight2d.dtype) if ctx.has_bias else None
-        return dx.to(x.dtype), dw, dbias, None
+        return dx.to(x.dtype), dw, dbias, None, None, None
 
 
 def depthwise_dilated_conv1d_triton(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None, dilation: int
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    dilation: int,
+    *,
+    block_c: int = _BLOCK_C,
+    block_l: int = _BLOCK_L,
 ) -> torch.Tensor:
     """Fused Triton depthwise dilated conv1d with "same" padding.
 
     x: (B, C, L). weight: (C, 1, K) as produced by nn.Conv1d(groups=C). bias: (C,) or None.
     Equivalent to nn.Conv1d(C, C, K, dilation=dilation, padding="same", groups=C)(x).
+
+    block_c/block_l override the default (fixed, not autotuned -- see the module
+    docstring) launch-grid block sizes; exposed as parameters purely so
+    examples/sweep_dw_conv_blocks.py can benchmark alternatives without
+    editing this module. MetaFormerBlock always uses the defaults.
     """
     x = x.contiguous()
     weight2d = weight.squeeze(1).contiguous()
-    return _DepthwiseDilatedConv1dFunction.apply(x, weight2d, bias, dilation)
+    return _DepthwiseDilatedConv1dFunction.apply(
+        x, weight2d, bias, dilation, block_c, block_l
+    )

@@ -11,7 +11,7 @@ from torch.utils.data import (
     ConcatDataset,
     DataLoader,
     Dataset,
-    WeightedRandomSampler,
+    Sampler,
 )
 
 from promoterai_torch.onehot import onehot_encode
@@ -292,6 +292,44 @@ def collate_variant(batch):
     return (x_refs, x_alts), ys
 
 
+class _SpeciesBatchSampler(Sampler):
+    """Yield one batch of indices per step, drawn entirely from a single
+    species dataset chosen with probability proportional to its size.
+
+    Sampling rows independently across a ConcatDataset of species (the
+    previous approach) lets a batch mix species with different real output
+    shapes, which crashes the default collate_fn. Illumina's training loop
+    instead runs tf.data.Dataset.sample_from_datasets over already-batched
+    per-species streams, so every batch is single-species -- this mirrors
+    that, at the same size-proportional sampling ratio.
+    """
+
+    def __init__(self, sizes: list, batch_size: int, num_batches: int, generator):
+        self.sizes = sizes
+        self.batch_size = batch_size
+        self.num_batches = num_batches
+        self.generator = generator
+        self.offsets = [0]
+        for size in sizes[:-1]:
+            self.offsets.append(self.offsets[-1] + size)
+
+    def __len__(self) -> int:
+        """Return the number of batches this sampler yields per epoch."""
+        return self.num_batches
+
+    def __iter__(self):
+        """Yield num_batches lists of batch_size global indices, one species per batch."""
+        weights = torch.tensor(self.sizes, dtype=torch.float64)
+        species = torch.multinomial(
+            weights, self.num_batches, replacement=True, generator=self.generator
+        )
+        for s in species.tolist():
+            local = torch.randint(
+                0, self.sizes[s], (self.batch_size,), generator=self.generator
+            )
+            yield (local + self.offsets[s]).tolist()
+
+
 def build_weighted_dataloader(
     datasets: list,
     batch_size: int,
@@ -303,41 +341,39 @@ def build_weighted_dataloader(
     prefetch_factor: int | None = 2,
 ) -> DataLoader:
     """
-    Combine multiple SequenceDatasets, sampling each dataset with probability
-    proportional to its size (species with more data get sampled more often).
+    Combine multiple SequenceDatasets. When shuffling, each batch is drawn
+    entirely from one species dataset, chosen with probability proportional
+    to that dataset's size (species with more data get sampled more often) --
+    see _SpeciesBatchSampler.
     """
     sizes = [len(d) for d in datasets]
     total = sum(sizes)
     combined = ConcatDataset(datasets)
 
-    loader_kwargs = {
-        "batch_size": batch_size,
+    worker_kwargs = {
         "num_workers": num_workers,
         "pin_memory": True,
     }
     if num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
+        worker_kwargs["persistent_workers"] = True
         if prefetch_factor is not None:
-            loader_kwargs["prefetch_factor"] = prefetch_factor
+            worker_kwargs["prefetch_factor"] = prefetch_factor
 
     if not shuffle:
         return DataLoader(
             combined,
+            batch_size=batch_size,
             shuffle=False,
-            **loader_kwargs,
+            **worker_kwargs,
         )
 
-    # Equal per-sample weights make each dataset's sampling probability
-    # proportional to its own size (size_i / total across all datasets).
-    weights = torch.ones(total, dtype=torch.float64)
     samples_per_rank = num_samples if num_samples is not None else total
+    num_batches = max(1, samples_per_rank // batch_size)
     generator = torch.Generator()
     generator.manual_seed(torch.initial_seed() + rank)
-    sampler = WeightedRandomSampler(
-        weights, num_samples=samples_per_rank, replacement=True, generator=generator
-    )
+    batch_sampler = _SpeciesBatchSampler(sizes, batch_size, num_batches, generator)
     return DataLoader(
         combined,
-        sampler=sampler,
-        **loader_kwargs,
+        batch_sampler=batch_sampler,
+        **worker_kwargs,
     )

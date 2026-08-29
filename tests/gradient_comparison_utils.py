@@ -99,3 +99,20 @@ def assert_pass_rate(
         f"(cosine>={cosine_threshold}, rel_l2<={rel_l2_tol:.1%}); "
         f"expected >= {min_pass_rate:.1%}\n" + report_top_offenders(results)
     )
+
+
+def assert_exact_match(results: list[ComparisonResult], *, label: str = "") -> None:
+    """Assert every tensor pair is bit-identical (max_abs_diff == 0).
+
+    For asserting a computation had *no effect at all* (e.g. a frozen buffer that
+    must never be touched), not for comparing two different frameworks' outputs --
+    cosine similarity is the wrong tool here. Computing it involves a sqrt/division,
+    which can introduce ~1e-16-level floating-point noise even between two
+    bit-identical arrays (sqrt(x)**2 doesn't always exactly recover x), making a
+    cosine_threshold=1.0 pass-rate check spuriously flaky in either direction.
+    """
+    changed = [r for r in results if r.max_abs_diff != 0]
+    assert not changed, (
+        f"{label}: {len(changed)}/{len(results)} tensors changed when none should have\n"
+        + "\n".join(f"  {r.name}: max_abs_diff={r.max_abs_diff:.3g}" for r in changed[:10])
+    )

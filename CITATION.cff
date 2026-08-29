@@ -5,8 +5,8 @@ message: >-
   model and method.
 type: software
 title: promoterai-torch
-version: 0.2.1
-date-released: 2026-08-01
+version: 0.3.0
+date-released: 2026-08-28
 authors:
   - family-names: He
     given-names: Adam

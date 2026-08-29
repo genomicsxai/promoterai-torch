@@ -146,6 +146,10 @@ def test_convert_multi_species(tmp_path):
 
     pt_model, args = load_pretrained(out_pt)
     assert args["output_dims"] == [8, 6]
+    # species_order must round-trip in the same order used to build output_heads,
+    # so downstream cross-framework comparisons can align a species to its head
+    # index without re-guessing it from Keras output dict key names.
+    assert args["species_order"] == ["human", "mouse"]
     pt_model.eval()
     with torch.no_grad():
         x = torch.zeros(1, 64, 4)

@@ -62,3 +62,14 @@ uv run pytest tests/test_tf_gradient_equivalence_real.py -v -s \
 
 This is skipped by default (including in CI, which has no GPU runner or
 licensed SavedModel) — see `tests/conftest.py` for the available options.
+
+Use a genuinely from-scratch, fully-trainable checkpoint for
+`test_tf_gradient_equivalence_real.py` (matching `train.py`'s scenario). If the
+only SavedModel you have was itself fine-tuned (e.g. `hg38_finetune`,
+`hg38_mm10_finetune` — most variables non-trainable), run
+`tests/test_tf_gradient_equivalence_finetune_real.py` instead; it mirrors
+`finetune.py`/`TwinModel`'s frozen-backbone structure and takes the same
+`--keras-savedmodel-path`/`--device`/`--gradient-batch-size` options. Pointing
+the wrong test at the wrong kind of checkpoint produces a large, deterministic
+mismatch that looks like a real bug but isn't — see "Fine-tuned checkpoints
+need a different gradient-equivalence test" in `notes/implementation.md`.

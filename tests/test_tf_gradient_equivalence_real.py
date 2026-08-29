@@ -90,8 +90,8 @@ def test_real_checkpoint_single_step_gradient_equivalence(
     CUDA GPU with triton installed and compute capability >= 7.0.
     """
     force_tf_cpu()  # before any TF op, including inside convert_tf_weights below
-    import torch
     import tf_keras as keras
+    import torch
 
     from promoterai_torch.triton_ops import triton_dw_conv_supported
     from promoterai_torch.utils import convert_tf_weights, load_pretrained

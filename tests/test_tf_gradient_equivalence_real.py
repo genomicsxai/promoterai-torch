@@ -106,6 +106,16 @@ def test_real_checkpoint_single_step_gradient_equivalence(
     x_np = np.eye(4, dtype="float32")[idx]  # (B, L, 4)
 
     lr, wd, eps, clip_norm = 5e-4, 5e-6, 1e-7, 1e-4
+    errors = []
+
+    def soft_assert(fn, *args, **kwargs):
+        """Run one assertion; on failure, record it and keep going so every head's
+        diagnostics get printed in one run instead of stopping at the first failure.
+        """
+        try:
+            fn(*args, **kwargs)
+        except AssertionError as exc:
+            errors.append(str(exc))
 
     for active_idx in range(len(output_dims)):
         # Fresh model instances per head so each iteration starts from the same
@@ -148,17 +158,20 @@ def test_real_checkpoint_single_step_gradient_equivalence(
         print(report_top_offenders(results["prediction"], k=len(results["prediction"])))
 
         # --- 1. Forward loss ---
-        np.testing.assert_allclose(
+        soft_assert(
+            np.testing.assert_allclose,
             results["loss_pt"], results["loss_keras"], atol=1e-3, rtol=1e-3,
             err_msg=f"forward-pass MSE loss differs between PyTorch and Keras{suffix}",
         )
 
         # --- 2/3. Raw and post-clip gradients ---
-        assert_pass_rate(
+        soft_assert(
+            assert_pass_rate,
             results["raw_grad"], cosine_threshold=0.99, rel_l2_tol=5e-2,
             min_pass_rate=0.95, label=f"raw gradients{suffix}",
         )
-        assert_pass_rate(
+        soft_assert(
+            assert_pass_rate,
             results["clipped_grad"], cosine_threshold=0.99, rel_l2_tol=5e-2,
             min_pass_rate=0.95, label=f"post-clip gradients{suffix}",
         )
@@ -170,7 +183,8 @@ def test_real_checkpoint_single_step_gradient_equivalence(
         # (rel_l2) one: Keras' AdamW places epsilon differently than PyTorch's, so the two
         # frameworks' step-1 update *magnitudes* genuinely differ for small-gradient
         # parameters, converging to <1% difference by step ~1000 -- not a porting bug.
-        assert_pass_rate(
+        soft_assert(
+            assert_pass_rate,
             results["param_delta_tiny_eps"], cosine_threshold=0.95, rel_l2_tol=0.1,
             min_pass_rate=0.9,
             label=(
@@ -178,14 +192,18 @@ def test_real_checkpoint_single_step_gradient_equivalence(
                 f"epsilon isolated out{suffix}"
             ),
         )
-        assert_pass_rate(
+        soft_assert(
+            assert_pass_rate,
             results["param_delta"], cosine_threshold=0.75, rel_l2_tol=float("inf"),
             min_pass_rate=0.9,
             label=f"AdamW parameter delta direction at the real epsilon=1e-7{suffix}",
         )
 
         # --- 5. BatchNorm running-stat update ---
-        assert_pass_rate(
+        soft_assert(
+            assert_pass_rate,
             results["bn_stats"], cosine_threshold=0.99, rel_l2_tol=5e-2,
             min_pass_rate=0.95, label=f"BatchNorm running-stat update{suffix}",
         )
+
+    assert not errors, "\n\n".join(errors)

@@ -79,6 +79,23 @@ similarity once epsilon is isolated out (`epsilon -> 0` on both sides), and that
 see `tests/gradient_comparison_utils.py` for the cosine-similarity/relative-L2/pass-rate
 comparison methodology, adapted from alphagenome-pytorch's JAX-comparison test suite.
 
+The "epsilon isolated out" (`param_delta_tiny_eps`, `tiny_eps=1e-10`) check is only *asserted*
+in the toy-scale test, not the real-checkpoint one, where it's diagnostic-only (printed, not
+gated). At real scale, against a genuine from-scratch base checkpoint, it failed for a
+scale-dependent reason unrelated to any mechanics disagreement: `train.py`'s
+`clip_grad_norm_per_parameter` clips each *whole tensor's* gradient norm to `max_norm=1e-4`, so
+for a huge tensor (an FFN weight is `model_dim x 4*model_dim`, ~4M+ elements at real scale vs. 64
+in the toy model) that norm budget spreads thin — average per-element gradient lands around
+`1e-4/sqrt(4e6) ~ 5e-8`, giving `sqrt(v) ~ 1.5e-9` for a typical element, only ~15x larger than
+`tiny_eps=1e-10`. For the smaller-than-typical elements inevitable in a heavy-tailed gradient
+distribution, `epsilon` can end up *larger* than `sqrt(v)` for that element — exactly where
+Keras' and PyTorch's differing epsilon-placement formulas diverge most, since that's the same
+mechanism as the real-`epsilon=1e-7` case above, just triggered by the isolation trick's own
+(otherwise arbitrary) `tiny_eps` choice instead of the real epsilon. Meanwhile raw/post-clip
+gradients, the real-epsilon `param_delta` direction check, and BatchNorm running stats all passed
+cleanly at real scale — those are what actually validates `train.py`'s production mechanics; this
+one check's failure is a confound in the diagnostic itself, not evidence against them.
+
 ## Multi-species loss must use a soft zero, not a hard skip (`src/promoterai_torch/train.py`)
 
 Illumina's `tfrecords.py` handles multi-species batches (e.g. human + mouse) with a

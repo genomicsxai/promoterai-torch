@@ -208,6 +208,51 @@ converted before this fix). See `tests/test_keras_pytorch_step.py` and
 `test_convert_multi_species`'s `species_order` assertion in
 `tests/test_convert.py`.
 
+## Fine-tuned checkpoints need a different gradient-equivalence test than from-scratch ones
+
+`tests/test_tf_gradient_equivalence_real.py` assumes `train.py`'s scenario: every
+parameter trainable, every BatchNorm layer computing live batch statistics in
+train mode, symmetrically on both frameworks. Running it against an actually
+fine-tuned checkpoint (e.g. `hg38_finetune`, `hg38_mm10_finetune`) produced a
+large, deterministic forward-pass mismatch that survived every precision
+intervention tried (species_order fix, disabling TF32, disabling oneDNN via
+`TF_ENABLE_ONEDNN_OPTS=0` -- the last of these *did* measurably shrink one
+head's discrepancy, confirming oneDNN's operation-reordering was a real but
+partial contributor, while the other head's loss stayed bit-for-bit identical
+across every attempt, ruling out precision as its cause).
+
+The actual root cause: a fine-tuned SavedModel has most of its variables
+marked non-trainable (the backbone, and every non-primary species' output
+head) -- confirmed by `keras_model.trainable_variables` containing exactly 12
+tensors, i.e. exactly one output head's worth (6 shortcut projections x
+weight+bias). Keras forces a `BatchNormalization` layer into inference mode
+(fixed running stats) whenever its `trainable` attribute is `False`,
+*regardless of the `training=True` argument* passed to the model call. A
+blanket `pt_model.train()` on the PyTorch side has no such exception -- every
+BatchNorm layer computes live batch statistics no matter what. So the two
+sides were normalizing the backbone completely differently: fixed stats
+(Keras) vs. freshly-computed batch stats on synthetic random input (PyTorch)
+-- a genuine structural mismatch, not a rounding-order artifact, hence its
+complete immunity to TF32/oneDNN toggling.
+
+Fixed by adding a *separate* test, `tests/test_tf_gradient_equivalence_finetune_real.py`
+(toy-scale counterpart: `tests/test_tf_gradient_equivalence_finetune.py`), using
+a new `run_single_finetune_step` in `tests/keras_pytorch_step.py` that mirrors
+`finetune.py`/`TwinModel` exactly instead: one ref/alt-diff AdamW(clipnorm=1.0)
+step through `output_heads[0]` only, with `TwinModel.train()`'s existing
+`base_model.eval()` / `output_heads[0].train()` split providing the matching
+freeze on the PyTorch side (no special-casing needed on the Keras side --
+its own non-trainable-layer behavior handles it automatically). This test also
+asserts the frozen backbone's BatchNorm running stats are bit-identical
+before/after on both sides, as a direct check that the freeze is actually
+taking effect.
+
+`test_tf_gradient_equivalence_real.py` remains the right test for a genuine
+from-scratch/fully-trainable checkpoint (test against one of those instead of
+a fine-tuned checkpoint if you have it) -- the two tests are not
+interchangeable, and pointing either at the wrong kind of checkpoint will
+produce a spurious mismatch that looks like a porting bug but isn't.
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

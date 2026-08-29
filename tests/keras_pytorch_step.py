@@ -1,10 +1,20 @@
 """Shared cross-framework single-training-step runner: PyTorch vs. Keras.
 
-Used by both the toy-scale test (tests/test_tf_gradient_equivalence.py) and the
-real-checkpoint/GPU test (tests/test_tf_gradient_equivalence_real.py) so the two
-share one implementation of "run one AdamW(clipnorm=...) step in each framework
-on the same batch and identical weights, and compare loss/gradients/optimizer
-deltas/BatchNorm stats" at any model scale.
+run_single_step is used by both the toy-scale test
+(tests/test_tf_gradient_equivalence.py) and the real-checkpoint/GPU test
+(tests/test_tf_gradient_equivalence_real.py) so the two share one
+implementation of "run one AdamW(clipnorm=...) step in each framework on the
+same batch and identical weights, and compare loss/gradients/optimizer
+deltas/BatchNorm stats" at any model scale -- this assumes a from-scratch,
+fully-trainable model, matching train.py.
+
+run_single_finetune_step is the equivalent for finetune.py's TwinModel
+scenario (backbone and every non-primary species head frozen, only
+output_heads[0] trainable), used by
+tests/test_tf_gradient_equivalence_finetune_real.py. The two aren't
+interchangeable: running a fine-tuned checkpoint (most of the model frozen)
+through run_single_step's blanket-trainable assumption produces a large,
+spurious mismatch -- see the finetune section in notes/implementation.md.
 """
 
 from __future__ import annotations
@@ -304,4 +314,173 @@ def run_single_step(
         "param_delta": compare_all(param_deltas_pt, mapped(param_deltas_keras)),
         "param_delta_tiny_eps": compare_all(deltas_pt_tiny, mapped(deltas_keras_tiny)),
         "bn_stats": compare_all(bn_stats_pt, mapped(bn_stats_keras)),
+    }
+
+
+def _backbone_bn_stats(base_model) -> dict:
+    """Snapshot every backbone BatchNorm running stat, keyed to match keras_tensors_to_pt."""
+    stats = {}
+    for i, block in enumerate(base_model.blocks):
+        stats[f"blocks.{i}.bn1.running_mean"] = block.bn1.running_mean.detach().cpu().numpy().copy()
+        stats[f"blocks.{i}.bn1.running_var"] = block.bn1.running_var.detach().cpu().numpy().copy()
+        stats[f"blocks.{i}.bn2.running_mean"] = block.bn2.running_mean.detach().cpu().numpy().copy()
+        stats[f"blocks.{i}.bn2.running_var"] = block.bn2.running_var.detach().cpu().numpy().copy()
+    return stats
+
+
+def run_single_finetune_step(
+    keras_model,
+    pt_twin_model,
+    x_ref_np: np.ndarray,
+    x_alt_np: np.ndarray,
+    y_np: np.ndarray,
+    *,
+    num_blocks: int,
+    shortcut_nums_desc: list,
+    lr: float,
+    wd: float,
+    eps: float,
+    clip_norm: float,
+    device: str = "cpu",
+    species_order: tuple | None = None,
+    tiny_eps: float = 1e-10,
+) -> dict:
+    """Run one finetune.py-equivalent AdamW(clipnorm=...) step: ref/alt diff through
+    output_heads[0] only, backbone and every other species head frozen -- mirrors
+    TwinModel/finetune.py exactly, unlike run_single_step (which assumes train.py's
+    from-scratch, fully-trainable scenario and is the wrong comparison for an actually
+    fine-tuned checkpoint). pt_twin_model must be a TwinModel wrapping the converted
+    base model -- its train() override already does the base_model.eval() /
+    output_heads[0].train() split this needs. On the Keras side no special-casing is
+    required: Keras forces any non-trainable BatchNormalization layer into inference
+    mode (fixed running stats) regardless of the training=True argument, matching
+    TwinModel's frozen backbone automatically -- see the finetune section in
+    notes/implementation.md for why testing this against test_tf_gradient_equivalence_real.py's
+    blanket-trainable assumption instead produced a large, spurious mismatch.
+
+    species_order should be load_pretrained's checkpoint args["species_order"]; per
+    TwinModel's own convention, output_heads[0]/species_order[0] is always the one
+    left trainable.
+    """
+    force_tf_cpu()
+    import tensorflow as tf
+    import tf_keras as keras
+    import torch
+
+    from promoterai_torch.utils import clip_grad_norm_per_parameter
+
+    species = species_order or ("human",)
+
+    def head0(pred):
+        pred_list, _ = normalize_keras_outputs(pred, species_order)
+        return pred_list[0]
+
+    # --- Keras: one manual finetuning step ---
+    keras_optimizer = keras.optimizers.AdamW(
+        learning_rate=lr, weight_decay=wd, epsilon=eps, clipnorm=clip_norm
+    )
+    x_ref_tf = tf.constant(x_ref_np)
+    x_alt_tf = tf.constant(x_alt_np)
+    y_tf = tf.constant(y_np)
+    bn_stats_keras_before = {
+        v.name.rstrip(":0"): v.numpy().copy()
+        for v in keras_model.non_trainable_variables
+        if "moving_" in v.name
+    }
+    with tf.GradientTape() as tape:
+        pred_ref = head0(keras_model(x_ref_tf, training=True))
+        pred_alt = head0(keras_model(x_alt_tf, training=True))
+        diff_keras = tf.reduce_mean(pred_alt - pred_ref, axis=[1, 2])
+        keras_loss = tf.reduce_mean(tf.square(diff_keras - y_tf))
+
+    def mapped(tensors):
+        return keras_tensors_to_pt(tensors, num_blocks, shortcut_nums_desc, species)
+
+    keras_vars = keras_model.trainable_variables
+    keras_names = [v.name.rstrip(":0") for v in keras_vars]
+    raw_grads = tape.gradient(keras_loss, keras_vars)
+    clipped_grads = [tf.clip_by_norm(g, clip_norm) for g in raw_grads]
+    params_before = {n: v.numpy().copy() for n, v in zip(keras_names, keras_vars)}
+    keras_optimizer.apply_gradients(zip(clipped_grads, keras_vars))
+    params_after = {n: v.numpy().copy() for n, v in zip(keras_names, keras_vars)}
+    bn_stats_keras_after = {
+        v.name.rstrip(":0"): v.numpy().copy()
+        for v in keras_model.non_trainable_variables
+        if "moving_" in v.name
+    }
+    raw_grads_keras = {n: g.numpy() for n, g in zip(keras_names, raw_grads)}
+    clipped_grads_keras = {n: g.numpy() for n, g in zip(keras_names, clipped_grads)}
+    param_deltas_keras = {n: params_after[n] - params_before[n] for n in params_before}
+
+    keras_tiny_vars = [tf.Variable(params_before[n].copy()) for n in keras_names]
+    keras.optimizers.AdamW(
+        learning_rate=lr, weight_decay=wd, epsilon=tiny_eps, clipnorm=clip_norm
+    ).apply_gradients(zip(clipped_grads, keras_tiny_vars))
+    deltas_keras_tiny = {
+        n: v.numpy() - params_before[n] for n, v in zip(keras_names, keras_tiny_vars)
+    }
+
+    # --- PyTorch: one manual finetuning step, same batch, same (converted) weights ---
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch_device = torch.device(device)
+    pt_twin_model.to(torch_device)
+    pt_twin_model.train()  # TwinModel.train(): base_model.eval() + output_heads[0].train()
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, pt_twin_model.parameters()),
+        lr=lr, weight_decay=wd, eps=eps,
+    )
+    x_ref_pt = torch.from_numpy(x_ref_np).to(torch_device)
+    x_alt_pt = torch.from_numpy(x_alt_np).to(torch_device)
+    y_pt = torch.from_numpy(y_np).to(torch_device)
+
+    bn_stats_pt_before = _backbone_bn_stats(pt_twin_model.base_model)
+
+    diff_pt = pt_twin_model(x_ref_pt, x_alt_pt)
+    loss_pt = torch.mean((diff_pt - y_pt) ** 2)
+    optimizer.zero_grad()
+    loss_pt.backward()
+    raw_grads_pt = {
+        n.removeprefix("base_model."): p.grad.detach().clone()
+        for n, p in pt_twin_model.named_parameters()
+        if p.grad is not None
+    }
+    params_before_pt = {
+        n.removeprefix("base_model."): p.detach().clone()
+        for n, p in pt_twin_model.named_parameters()
+        if p.requires_grad
+    }
+    clip_grad_norm_per_parameter(pt_twin_model.parameters(), max_norm=clip_norm)
+    clipped_grads_pt = {
+        n.removeprefix("base_model."): p.grad.detach().clone()
+        for n, p in pt_twin_model.named_parameters()
+        if p.grad is not None
+    }
+    optimizer.step()
+    param_deltas_pt = {
+        n.removeprefix("base_model."): (p.detach() - params_before_pt[n.removeprefix("base_model.")]).cpu().numpy()
+        for n, p in pt_twin_model.named_parameters()
+        if p.requires_grad
+    }
+    bn_stats_pt_after = _backbone_bn_stats(pt_twin_model.base_model)
+
+    deltas_pt_tiny = {}
+    for name, grad in clipped_grads_pt.items():
+        p = torch.nn.Parameter(params_before_pt[name].clone())
+        p.grad = grad.clone()
+        torch.optim.AdamW([p], lr=lr, weight_decay=wd, eps=tiny_eps).step()
+        deltas_pt_tiny[name] = (p.detach() - params_before_pt[name]).cpu().numpy()
+
+    raw_grads_pt_np = {n: g.cpu().numpy() for n, g in raw_grads_pt.items()}
+    clipped_grads_pt_np = {n: g.cpu().numpy() for n, g in clipped_grads_pt.items()}
+
+    return {
+        "loss_pt": float(loss_pt.item()),
+        "loss_keras": float(keras_loss.numpy()),
+        "raw_grad": compare_all(raw_grads_pt_np, mapped(raw_grads_keras)),
+        "clipped_grad": compare_all(clipped_grads_pt_np, mapped(clipped_grads_keras)),
+        "param_delta": compare_all(param_deltas_pt, mapped(param_deltas_keras)),
+        "param_delta_tiny_eps": compare_all(deltas_pt_tiny, mapped(deltas_keras_tiny)),
+        "bn_unchanged_keras": compare_all(bn_stats_keras_before, bn_stats_keras_after),
+        "bn_unchanged_pt": compare_all(bn_stats_pt_before, bn_stats_pt_after),
     }

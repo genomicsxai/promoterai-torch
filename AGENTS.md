@@ -130,6 +130,8 @@ uv run pytest tests/test_tf_gradient_equivalence_real.py -v -s \
 
 A weekly scheduled workflow (`tf-equivalence.yml`) also runs the toy-scale tests, but only as a final failsafe against TF/PyTorch API drift on `main` — it is not a pre-merge gate, so don't rely on it to catch a regression in your own PR. The real-checkpoint test isn't in that workflow (no GPU runner, no licensed SavedModel in CI) — run it yourself on a GPU box before merging changes that could plausibly behave differently at full scale.
 
+`test_tf_gradient_equivalence_real.py` assumes a from-scratch, fully-trainable checkpoint (`train.py`'s scenario) — pointing it at an actually fine-tuned checkpoint (most variables non-trainable) produces a large, deterministic, precision-immune mismatch that looks like a porting bug but isn't, because Keras forces non-trainable BatchNorm layers into inference mode regardless of `training=True` while a blanket `pt_model.train()` doesn't. Use `tests/test_tf_gradient_equivalence_finetune_real.py` instead for a fine-tuned checkpoint — it mirrors `finetune.py`/`TwinModel`'s actual frozen-backbone/single-trainable-head structure. See "Fine-tuned checkpoints need a different gradient-equivalence test" in `notes/implementation.md`.
+
 ## Key Data Details
 
 - **hg38 output tracks**: 498 (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq)

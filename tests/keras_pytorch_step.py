@@ -236,6 +236,19 @@ def run_single_step(
     }
 
     # --- PyTorch: one manual train step, same batch, same (converted) weights ---
+    # force_tf_cpu() above pins Keras to full-precision float32 on CPU (TF32 is a
+    # GPU-only reduced-precision matmul/conv mode, never used on CPU) -- if this ran
+    # on a CUDA device with PyTorch's TF32 paths left enabled, every conv/matmul would
+    # run at ~10 mantissa bits instead of float32's 23, and 24 blocks of BatchNorm
+    # feeding its *live* batch statistics forward (unlike eval mode's fixed running
+    # stats) would keep re-measuring and re-applying that per-layer precision loss,
+    # compounding a small per-op rounding difference into a large, but still
+    # direction-correlated, final scale drift -- exactly the pattern this test's
+    # "prediction" diagnostic previously caught (cosine~0.92, rel_l2~47%). Disabling
+    # TF32 makes the comparison apples-to-apples regardless of PyTorch/cuDNN version
+    # defaults, which have changed across releases.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     torch_device = torch.device(device)
     pt_model.to(torch_device)
     pt_model.train()

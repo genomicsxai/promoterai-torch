@@ -9,17 +9,23 @@ Triton kernel compilation is only reliable on newer NVIDIA GPUs (Volta/sm_70+), 
 callers must fall back to nn.Conv1d when this isn't available -- see
 `triton_dw_conv_supported`.
 
-The launch grid is (N, num_l_blocks): parallelizing across sequence-length blocks
-too, not just the batch dimension N, matters because a real training batch can be
-as small as 2-8 (see this repo's own --gradient-batch-size default), which alone
-would launch far fewer programs than a GPU has SMs. Modeled directly on
-jmschrei/cherimoya's cheri.py (a sibling fused dilated-depthwise-conv kernel for a
-different model), which uses the same (N, num_l_blocks) grid and, for exactly the
-same reason, fixes its L-block size as a plain constant rather than autotuning it:
-the backward pass's dW/dbias partial-reduction buffers are shaped by
-num_l_blocks = cdiv(L, BLOCK_L), and Triton's autotune model allocates output
-buffers once, before any trial config runs -- if BLOCK_L varied per trial, that
-buffer's required shape would too, which doesn't work.
+The launch grid is (N, num_c_blocks, num_l_blocks): parallelizing across
+channel and sequence-length blocks too, not just the batch dimension N, matters
+for two independent reasons. First, a real training batch can be as small as
+2-8 (see this repo's own --gradient-batch-size default), which alone would
+launch far fewer programs than a GPU has SMs -- the num_l_blocks axis is
+modeled directly on jmschrei/cherimoya's cheri.py (a sibling fused
+dilated-depthwise-conv kernel for a different model), which uses the same grid
+approach and, for exactly the same reason, fixes its L-block size as a plain
+constant rather than autotuning it: the backward pass's dW/dbias
+partial-reduction buffers are shaped by num_l_blocks = cdiv(L, BLOCK_L), and
+Triton's autotune model allocates output buffers once, before any trial config
+runs -- if BLOCK_L varied per trial, that buffer's required shape would too,
+which doesn't work. Second, and separately, letting one program cover the
+*entire* channel width (next_power_of_2(C), 1024 for the real model) makes its
+accumulator tile too large to fit in registers -- see _BLOCK_C below -- so C is
+split across the grid too, for the same reason (and same fixed-not-autotuned
+constraint) as L.
 """
 
 from __future__ import annotations
@@ -61,6 +67,15 @@ def triton_dw_conv_supported(device_type: str, device_index: int | None) -> bool
 # dW/dbias buffers are shaped by cdiv(L, _BLOCK_L)). Matches cherimoya's choice.
 _BLOCK_L = 64
 
+# Also fixed, and for a second, independent reason: BLOCK_C used to cover the
+# *entire* channel width in one program (next_power_of_2(C) = 1024 for the real
+# model). Combined with BLOCK_L=64, that's a 1024x64 = 65536-element accumulator
+# tile -- at num_warps=8 (256 threads), 256 registers/thread for that one array
+# alone, already past the 255/thread hardware limit before counting anything
+# else live in the kernel. Splitting C across the grid too keeps each program's
+# working set small enough to actually fit in registers.
+_BLOCK_C = 128
+
 
 def _autotune_configs():
     configs = []
@@ -94,8 +109,9 @@ if triton is not None:
         # for coalesced access (a (BLOCK_L, BLOCK_C) tile would instead vectorize
         # over the strided C axis -- ~15-20x slower, measured).
         pid_n = tl.program_id(0)
-        pid_l = tl.program_id(1)
-        offs_c = tl.arange(0, BLOCK_C)
+        pid_c = tl.program_id(1)
+        pid_l = tl.program_id(2)
+        offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
         mask_c = offs_c < C
 
         if HAS_BIAS:
@@ -155,8 +171,9 @@ if triton is not None:
         # the combined (n, l_block) axis on the host afterward, the same way the
         # batch axis alone used to be reduced.
         pid_n = tl.program_id(0)
-        pid_l = tl.program_id(1)
-        offs_c = tl.arange(0, BLOCK_C)
+        pid_c = tl.program_id(1)
+        pid_l = tl.program_id(2)
+        offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
         mask_c = offs_c < C
 
         dy_base = dy_ptr + pid_n * stride_n
@@ -211,8 +228,9 @@ if triton is not None:
 class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
     """Autograd wrapper around the fused Triton depthwise dilated conv1d kernels.
 
-    Both kernels launch a (N, num_l_blocks) grid -- see the module docstring for
-    why num_l_blocks uses the fixed _BLOCK_L rather than an autotuned one.
+    Both kernels launch a (N, num_c_blocks, num_l_blocks) grid -- see the module
+    docstring for why num_c_blocks/num_l_blocks use the fixed _BLOCK_C/_BLOCK_L
+    rather than autotuned ones.
     """
 
     @staticmethod
@@ -221,12 +239,12 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
         N, C, L = x.shape
         K = weight2d.shape[1]
         pad_left = dilation * (K - 1) // 2
-        block_c = triton.next_power_of_2(C)
         has_bias = bias is not None
+        num_c_blocks = triton.cdiv(C, _BLOCK_C)
         num_l_blocks = triton.cdiv(L, _BLOCK_L)
 
         y = torch.empty_like(x)
-        _dw_conv1d_fwd_kernel[(N, num_l_blocks)](
+        _dw_conv1d_fwd_kernel[(N, num_c_blocks, num_l_blocks)](
             x,
             weight2d,
             bias if has_bias else weight2d,
@@ -237,7 +255,7 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
             L=L,
             C=C,
             K=K,
-            BLOCK_C=block_c,
+            BLOCK_C=_BLOCK_C,
             BLOCK_L=_BLOCK_L,
             HAS_BIAS=has_bias,
         )
@@ -253,8 +271,8 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
         x, weight2d = ctx.saved_tensors
         N, C, L = x.shape
         K = weight2d.shape[1]
-        block_c = triton.next_power_of_2(C)
         dy = dy.contiguous()
+        num_c_blocks = triton.cdiv(C, _BLOCK_C)
         num_l_blocks = triton.cdiv(L, _BLOCK_L)
 
         dx = torch.empty_like(x)
@@ -267,7 +285,7 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
             else None
         )
 
-        _dw_conv1d_bwd_kernel[(N, num_l_blocks)](
+        _dw_conv1d_bwd_kernel[(N, num_c_blocks, num_l_blocks)](
             dy,
             x,
             weight2d,
@@ -281,7 +299,7 @@ class _DepthwiseDilatedConv1dFunction(torch.autograd.Function):
             L=L,
             C=C,
             K=K,
-            BLOCK_C=block_c,
+            BLOCK_C=_BLOCK_C,
             BLOCK_L=_BLOCK_L,
             HAS_BIAS=ctx.has_bias,
         )

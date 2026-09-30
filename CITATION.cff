@@ -36,3 +36,16 @@ preferred-citation:
   journal: Science
   year: 2025
   doi: 10.1126/science.ads7373
+references:
+  - type: blog
+    title: >-
+      promoterai-torch: a PyTorch port of Illumina's PromoterAI
+    authors:
+      - family-names: He
+        given-names: Adam Youlin
+      - family-names: Kundaje
+        given-names: Anshul
+    year: 2026
+    date-published: 2026-09-29
+    url: https://genomicsxai.github.io/blogs/2026-014/
+    doi: 10.5281/zenodo.23038831

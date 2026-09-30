@@ -191,6 +191,8 @@ environment and running the test suite.
 
 Jaganathan, Ersaro, Novakovsky et al. *Science* (2025) Predicting expression-altering promoter mutations with deep learning. doi:10.1126/science.ads7373
 
+He, Kundaje. *Genomics x AI Blog* (2026) [promoterai-torch: a PyTorch port of Illumina's PromoterAI](https://genomicsxai.github.io/blogs/2026-014/). doi:10.5281/zenodo.23038831
+
 Original TF implementation: [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI)
 
 Citation metadata for this software is available in [CITATION.cff](CITATION.cff).

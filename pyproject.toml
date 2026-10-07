@@ -10,7 +10,7 @@ authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10"
 keywords = [
     "bioinformatics",
     "deep-learning",
@@ -31,6 +31,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
@@ -53,7 +54,7 @@ convert = [
     "tensorflow",
     "tf-keras",
 ]
-train = ["h5py>=3.0", "pybigtools>=0.2.5"]
+train = ["h5py>=3.0", "figwig>=0.1"]
 interpret = ["tangermeme>=0.5"]
 wandb = ["wandb>=0.16"]
 
@@ -61,8 +62,8 @@ wandb = ["wandb>=0.16"]
 test = [
     "pytest>=8",
     "h5py>=3.0",
-    "pybigtools>=0.2.5",
-    "tangermeme>=0.5",
+    "figwig>=0.1",
+    "tangermeme>=0.5; python_version < '3.14'",
 ]
 publish = ["build>=1.2", "twine>=5.0"]
 dev = [{ include-group = "test" }, { include-group = "publish" }]

@@ -30,23 +30,25 @@ from promoterai_torch.onehot import onehot_encode
 if TYPE_CHECKING:
     import h5py
 
-_pybigtools_import_error = None
+_figwig_import_error = None
 try:
-    import pybigtools
+    from figwig import BigWigReader
 except ImportError as exc:
-    pybigtools = None
-    _pybigtools_import_error = exc
+    BigWigReader = None
+    _figwig_import_error = exc
 
 
 def _extract_bigwig(bw, chrom, start, end):
-    """Fetch values from a BigWig handle; returns zeros on any error or missing region."""
+    """Fetch values from a BigWigReader; returns zeros on any error or missing region."""
     try:
-        vals = bw.values(chrom, max(0, start), end, missing=0.0, oob=0.0)
-        if vals is None:
+        clamped = max(0, start)
+        width = end - clamped
+        if width <= 0:
             return np.zeros(end - start, dtype="float32")
-        vals = np.array(vals, dtype="float32")
-        return vals
-    except Exception:  # noqa: BLE001 - any pybigtools read failure should fall back to zeros
+        vals = bw.read(np.array([chrom]), np.array([clamped]), width)[0]
+        np.nan_to_num(vals, copy=False, nan=0.0)
+        return vals.astype("float32")
+    except Exception:  # noqa: BLE001 - any figwig read failure should fall back to zeros
         return np.zeros(end - start, dtype="float32")
 
 
@@ -106,13 +108,13 @@ def preprocess_chrom(
         )
 
     fasta = pyfaidx.Fasta(fasta_file)
-    if pybigtools is None:
+    if BigWigReader is None:
         raise ImportError(
-            "pybigtools is required for preprocessing. "
+            "figwig is required for preprocessing. "
             'Install with: pip install "promoterai-torch[train]"'
-        ) from _pybigtools_import_error
-    bws_fwd = [pybigtools.open(p) for p in df_bw["fwd"]]
-    bws_rev = [pybigtools.open(p) for p in df_bw["rev"]]
+        ) from _figwig_import_error
+    bws_fwd = [BigWigReader(p) for p in df_bw["fwd"]]
+    bws_rev = [BigWigReader(p) for p in df_bw["rev"]]
     bw_xforms = [_compile_xform(expr) for expr in df_bw["xform"]]
 
     half_in = input_length // 2
@@ -186,9 +188,6 @@ def preprocess_chrom(
     flush(force=True)
     if h5_file is not None:
         h5_file.close()
-
-    for bw in bws_fwd + bws_rev:
-        bw.close()
 
     if total_rows:
         print(f"Preprocessing complete for {chrom}: {total_rows} samples written to {hdf5_path}.")

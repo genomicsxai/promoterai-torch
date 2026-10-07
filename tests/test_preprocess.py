@@ -1,5 +1,3 @@
-import types
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,16 +8,19 @@ from promoterai_torch import preprocess
 from promoterai_torch.dataset import onehot_encode
 
 
-class FakeBigWig:
+class FakeBigWigReader:
+    """Minimal stand-in for figwig.BigWigReader in tests."""
+
     def __init__(self, values):
         self.values_array = np.asarray(values, dtype="float32")
-        self.closed = False
 
-    def values(self, chrom, start, end, missing=0.0, oob=0.0):
-        return self.values_array[: end - start]
-
-    def close(self):
-        self.closed = True
+    def read(self, chroms, starts, width):
+        n = len(chroms)
+        out = np.zeros((n, width), dtype="float32")
+        usable = min(width, len(self.values_array))
+        for i in range(n):
+            out[i, :usable] = self.values_array[:usable]
+        return out
 
 
 def test_preprocess_uses_stranded_bigwigs_xforms_and_reverses_minus(tmp_path, monkeypatch):
@@ -37,14 +38,11 @@ def test_preprocess_uses_stranded_bigwigs_xforms_and_reverses_minus(tmp_path, mo
         [{"fwd": "fwd.bw", "rev": "rev.bw", "xform": "lambda x: x * 2"}]
     ).to_csv(bw_path, sep="\t", index=False)
 
-    opened = {}
-
-    def fake_open(path):
+    def fake_reader(path):
         values = [1, 2, 3, 4] if path == "fwd.bw" else [10, 20, 30, 40]
-        opened[path] = FakeBigWig(values)
-        return opened[path]
+        return FakeBigWigReader(values)
 
-    monkeypatch.setattr(preprocess, "pybigtools", types.SimpleNamespace(open=fake_open))
+    monkeypatch.setattr(preprocess, "BigWigReader", fake_reader)
 
     out_dir = tmp_path / "h5"
     preprocess.preprocess_chrom(
@@ -67,8 +65,6 @@ def test_preprocess_uses_stranded_bigwigs_xforms_and_reverses_minus(tmp_path, mo
     np.testing.assert_array_equal(x[1], plus_x[::-1, ::-1])
     np.testing.assert_allclose(y[0, :, 0], np.array([2, 4, 6, 8], dtype="float32"))
     np.testing.assert_allclose(y[1, :, 0], np.array([80, 60, 40, 20], dtype="float32"))
-    assert opened["fwd.bw"].closed
-    assert opened["rev.bw"].closed
 
 
 def test_preprocess_keeps_boundary_tss_as_zero_row_matching_tf_generator(
@@ -95,8 +91,8 @@ def test_preprocess_keeps_boundary_tss_as_zero_row_matching_tf_generator(
 
     monkeypatch.setattr(
         preprocess,
-        "pybigtools",
-        types.SimpleNamespace(open=lambda path: FakeBigWig([1, 2, 3, 4])),
+        "BigWigReader",
+        lambda path: FakeBigWigReader([1, 2, 3, 4]),
     )
 
     out_dir = tmp_path / "h5"
@@ -122,7 +118,7 @@ def test_preprocess_keeps_boundary_tss_as_zero_row_matching_tf_generator(
     assert y[1].sum() > 0.0
 
 
-def test_preprocess_reports_missing_pybigtools(tmp_path, monkeypatch):
+def test_preprocess_reports_missing_figwig(tmp_path, monkeypatch):
     fasta_path = tmp_path / "mini.fa"
     fasta_path.write_text(">chr1\nACGT\n")
     tss_path = tmp_path / "tss.tsv"
@@ -134,9 +130,9 @@ def test_preprocess_reports_missing_pybigtools(tmp_path, monkeypatch):
         bw_path, sep="\t", index=False
     )
 
-    import_error = ModuleNotFoundError("No module named 'pybigtools'")
-    monkeypatch.setattr(preprocess, "pybigtools", None)
-    monkeypatch.setattr(preprocess, "_pybigtools_import_error", import_error)
+    import_error = ModuleNotFoundError("No module named 'figwig'")
+    monkeypatch.setattr(preprocess, "BigWigReader", None)
+    monkeypatch.setattr(preprocess, "_figwig_import_error", import_error)
 
     with np.testing.assert_raises_regex(
         ImportError, r'pip install "promoterai-torch\[train\]"'

@@ -379,11 +379,11 @@ the CLI, 527 -> 100 s with 150/150 identical scores.
 The paper benchmark (`benchmark.score_variants`) goes through the same
 `score.variant_diffs`. All seven benchmark TSVs are substitutions; most have ~1.0
 variant per site (GTEx/UKBB/GEL/MPRA_eQTL), the saturation sets 1.7 (MPRA) and 2.4
-(CAGI5). On 100-variant subsets, hg38_finetune, end to end including model
-load: GTEx_outlier 351 -> 158 s (TITAN Xp), CAGI5_saturation
-399 -> 140 s (TITAN X), identical scores and AUROCs. So even at ~1 variant per
-site it measured 2.2x, a bit more than the ~1.8x expected from the window
-arithmetic (not investigated). Multi-device runs used to
+(CAGI5). On 100-variant subsets, hg38_finetune, TITAN Xp, end to end including
+model load: GTEx_outlier (99 sites) 351 -> 152 s (2.3x), CAGI5_saturation (63
+sites) 353 -> 105 s (3.4x), identical scores and AUROCs (and identical to a run on
+the TITAN X). So even at ~1 variant per site it measured 2.3x, more than the ~1.8x
+expected from the window arithmetic (not investigated). Multi-device runs used to
 split rows with `np.array_split`, which can cut a site across shards; they now
 split whole sites (`site_shards`), so each site's reference pass happens once.
 

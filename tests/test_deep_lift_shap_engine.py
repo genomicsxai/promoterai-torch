@@ -8,6 +8,7 @@ pytest.importorskip("tangermeme", reason="tangermeme not installed")
 
 from tangermeme.deep_lift_shap import deep_lift_shap as tm_deep_lift_shap  # noqa: E402
 
+from promoterai_torch import _deep_lift_shap_engine as engine  # noqa: E402
 from promoterai_torch._deep_lift_shap_engine import deep_lift_shap  # noqa: E402
 from promoterai_torch.architecture import PromoterAI  # noqa: E402
 
@@ -15,12 +16,15 @@ from promoterai_torch.architecture import PromoterAI  # noqa: E402
 class _Wrapper(nn.Module):
     """The quantity examples/deepliftshap_region.py attributes: mean of one head's output."""
 
-    def __init__(self, model, head=0):
+    def __init__(self, model, head=0, tracks=None):
         super().__init__()
-        self.model, self.head = model, head
+        self.model, self.head, self.tracks = model, head, tracks
 
     def forward(self, x):
-        return self.model(x.transpose(1, 2))[self.head].mean(dim=(1, 2)).unsqueeze(1)
+        out = self.model(x.transpose(1, 2))[self.head]
+        if self.tracks is not None:
+            out = out[..., self.tracks]
+        return out.mean(dim=(1, 2)).unsqueeze(1)
 
 
 def _model(num_blocks=8, model_dim=8, output_crop=64, seed=0):
@@ -65,7 +69,7 @@ def test_engine_matches_tangermeme(num_blocks, model_dim, L, output_crop, head, 
     )
     got, deltas = deep_lift_shap(
         model, X, head=head, n_shuffles=6, random_state=0, ref_chunk=ref_chunk,
-        return_deltas=True, device="cpu",
+        return_deltas=True, device="cpu", batch_size=1,
     )
     torch.testing.assert_close(got, expected, rtol=1e-10, atol=1e-14)
     assert deltas.shape == (2, 6)
@@ -83,3 +87,96 @@ def test_engine_given_references_and_hypothetical():
         )
         got = deep_lift_shap(model, X, references=refs, hypothetical=hypothetical, ref_chunk=2)
         torch.testing.assert_close(got, expected, rtol=1e-10, atol=1e-14)
+
+
+def _tm(model, X, **kw):
+    head, tracks = kw.pop("head", 0), kw.pop("tracks", None)
+    return tm_deep_lift_shap(
+        _Wrapper(model, head, tracks), X, device="cpu", dtype=torch.float64,
+        warning_threshold=1e9, **kw,
+    )
+
+
+def test_engine_tracks_subset():
+    model = _model()
+    X = _X(2, 256)
+    for tracks in ([2], [0, 3, 4]):
+        expected = _tm(model, X, tracks=tracks, n_shuffles=4, random_state=3)
+        got = deep_lift_shap(model, X, tracks=tracks, n_shuffles=4, random_state=3)
+        torch.testing.assert_close(got, expected, rtol=1e-10, atol=1e-14)
+    with pytest.raises(ValueError, match="tracks"):
+        deep_lift_shap(model, X, tracks=[5], n_shuffles=2)
+
+
+@pytest.mark.parametrize("batch_size, ref_chunk", [(2, None), (2, 4), (3, 6), (None, None)])
+def test_engine_batching_matches_one_at_a_time(batch_size, ref_chunk):
+    """Several sequences per step, and reference chunks that don't divide n_shuffles."""
+    model = _model()
+    X = _X(5, 256, seed=2)
+    expected, d_expected = deep_lift_shap(
+        model, X, n_shuffles=6, random_state=0, batch_size=1, ref_chunk=1, return_deltas=True
+    )
+    got, d = deep_lift_shap(
+        model, X, n_shuffles=6, random_state=0, batch_size=batch_size, ref_chunk=ref_chunk,
+        return_deltas=True,
+    )
+    torch.testing.assert_close(got, expected, rtol=1e-12, atol=1e-16)
+    assert d.shape == d_expected.shape == (5, 6) and float(d.max()) < 1e-12
+
+
+def test_plan():
+    model = _model(num_blocks=24, model_dim=1024, output_crop=0).float()
+    L, M = 20480, 20480 * 1024 * 4
+    # A 12 GB card after the weights: two references beside the sequence, one sequence a step.
+    assert engine._plan(model, L, 10, 20, torch.float32, torch.device("cpu"), 10 << 30) == (1, 2)
+    small = _model(num_blocks=24, model_dim=64, output_crop=0).float()
+    B, k = engine._plan(small, L, 100, 20, torch.float32, torch.device("cpu"), 10 << 30)
+    assert k == 20 and 1 < B < 100
+    with pytest.warns(UserWarning, match="budget"):
+        assert engine._plan(model, L, 1, 20, torch.float32, torch.device("cpu"), M) == (1, 1)
+
+
+def test_engine_retries_smaller_after_oom(monkeypatch):
+    model = _model()
+    X = _X(3, 256)
+    expected = deep_lift_shap(model, X, n_shuffles=4, random_state=0, batch_size=1, ref_chunk=1)
+    real, calls = engine._step, []
+
+    def flaky(*args):
+        B, k = args[7].shape[:2]
+        calls.append((B, k))
+        if B * k > 2:
+            raise torch.OutOfMemoryError("fake")
+        return real(*args)
+
+    monkeypatch.setattr(engine, "_step", flaky)
+    with pytest.warns(UserWarning, match="retrying"):
+        got = deep_lift_shap(model, X, n_shuffles=4, random_state=0, batch_size=3, ref_chunk=4)
+    torch.testing.assert_close(got, expected, rtol=1e-12, atol=1e-16)
+    assert calls[0] == (3, 4) and (1, 2) in calls
+
+
+def test_engine_compiled_matches_eager():
+    pytest.importorskip("torch._inductor")
+    model = _model()
+    X = _X(2, 256)
+    eager = deep_lift_shap(model, X, n_shuffles=3, random_state=0, ref_chunk=2)
+    compiled = deep_lift_shap(model, X, n_shuffles=3, random_state=0, ref_chunk=2, compile=True)
+    torch.testing.assert_close(compiled, eager, rtol=1e-9, atol=1e-13)
+
+
+def test_rescale_variants_agree():
+    """In-place (eager), functional (torch.compile) and TorchScript (pre-Volta GPUs) rules."""
+    import warnings
+
+    g = torch.Generator().manual_seed(0)
+    a_x = torch.randn(2, 1, 64, 8, generator=g, dtype=torch.float64)
+    a_r = torch.randn(2, 3, 64, 8, generator=g, dtype=torch.float64)
+    a_r[:, 0, :8] = a_x[:, 0, :8] + 1e-8  # the plain-gradient fallback
+    G = torch.randn(2, 3, 64, 8, generator=g, dtype=torch.float64)
+    expected = engine._rescale(G, a_x, a_r)
+    torch.testing.assert_close(engine._rescale_(G.clone(), a_x, a_r.clone()), expected)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        scripted = torch.jit.script(engine._rescale)
+    torch.testing.assert_close(scripted(G, a_x, a_r), expected)

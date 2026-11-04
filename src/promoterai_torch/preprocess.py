@@ -4,15 +4,21 @@ chromosome for the PyTorch training pipeline. The BigWig TSV must contain `fwd`,
 `rev`, and `xform` columns: paths to the forward- and reverse-strand BigWig files
 for a track, and a Python expression (e.g. "np.arcsinh") applied to its values.
 
-Samples are written incrementally in --chunk_size batches into a single growable
-HDF5 file per chromosome (rather than one small file per batch), bounding peak
-memory use without producing a large number of small files per chromosome.
+Samples are buffered in --chunk_size batches (each batch's BigWig windows are
+read in one multithreaded figwig call) and appended to a single growable HDF5
+file per chromosome, stored one sample per HDF5 chunk for fast random-row reads
+during training. The y buffer is chunk_size x output_length x n_tracks float32
+(64 x 16384 x 498 is ~2 GiB), so lower --chunk_size for many tracks.
+
+Chromosomes are independent; run one process per chromosome in parallel (e.g.
+with GNU parallel) -- gzip compression of the HDF5 output, not BigWig reading,
+dominates the run time and is single-threaded per process.
 
 Usage:
     python -m promoterai_torch.preprocess \
         --hdf5_folder <out> --tss_file data/annotation/tss_hg38.tsv \
         --fasta_file <genome.fa> --bigwig_files data/bigwig/hg38.tsv \
-        --chrom chr1 --input_length 32768 --output_length 16384 --chunk_size 256
+        --chrom chr1 --input_length 32768 --output_length 16384 --chunk_size 64
 """
 
 from __future__ import annotations
@@ -68,16 +74,21 @@ def _compile_xform(expr: str):
     return eval(expr, {"np": np, "__builtins__": {}})
 
 
-def _create_growable_dataset(
-    f: h5py.File, name: str, sample_shape: tuple, chunk_rows: int
-) -> h5py.Dataset:
-    """Create a resizable, gzip-compressed dataset that starts empty and grows by row."""
+def _create_growable_dataset(f: h5py.File, name: str, sample_shape: tuple) -> h5py.Dataset:
+    """Create a resizable, gzip-compressed dataset that starts empty and grows by row.
+
+    Each HDF5 chunk is one sample. Training reads one random row at a time, and
+    HDF5 decompresses a whole chunk to read any part of it, so multi-row chunks
+    make every read decompress (and discard) many other samples -- 67x slower
+    per read at 64 rows per chunk. Multi-row chunks can also exceed HDF5's 4 GB
+    chunk limit at real scale (256 x 16384 bp x 498 tracks of float32 is 7.8 GiB).
+    """
     return f.create_dataset(
         name,
         shape=(0, *sample_shape),
         maxshape=(None, *sample_shape),
         dtype="float32",
-        chunks=(chunk_rows, *sample_shape),
+        chunks=(1, *sample_shape),
         compression="gzip",
         compression_opts=4,
     )
@@ -142,23 +153,26 @@ def preprocess_chrom(
     total_rows = 0
 
     def build_y() -> np.ndarray:
-        """Batch-read the buffered samples' tracks; (n, output_length, n_tracks)."""
-        ys = np.zeros((len(buf), n_tracks, output_length), dtype="float32")
+        """Batch-read the buffered samples' tracks; (n, output_length, n_tracks).
+
+        Each strand's windows are read in one call into an (k, n_tracks,
+        output_length) scratch array, transformed in place, then flipped
+        (minus strand) and transposed straight into the output, so peak memory
+        is the output plus one strand's scratch. Boundary rows stay all-zero,
+        even when xform(0) != 0.
+        """
+        ys = np.zeros((len(buf), output_length, n_tracks), dtype="float32")
         for minus, readers in ((False, bws_fwd), (True, bws_rev)):
             idx = [i for i, (x, _, m) in enumerate(buf) if x is not None and m == minus]
-            if idx:
-                ys[idx] = _read_tracks(
-                    readers, chrom, [buf[i][1] for i in idx], output_length
-                )
-        for j, xform in enumerate(bw_xforms):
-            ys[:, j] = xform(ys[:, j])
-        ys = ys.transpose(0, 2, 1)  # (n, output_length, n_tracks)
-        for i, (x, _, minus) in enumerate(buf):
-            if x is None:
-                ys[i] = 0.0  # boundary rows stay all-zero even if xform(0) != 0
-            elif minus:
-                ys[i] = ys[i, ::-1]
-        return np.ascontiguousarray(ys)
+            if not idx:
+                continue
+            tracks = _read_tracks(readers, chrom, [buf[i][1] for i in idx], output_length)
+            for j, xform in enumerate(bw_xforms):
+                tracks[:, j] = xform(tracks[:, j])
+            if minus:
+                tracks = tracks[:, :, ::-1]
+            ys[idx] = tracks.transpose(0, 2, 1)
+        return ys
 
     def flush(force=False):
         """Append buffered samples to the chromosome's HDF5 file, creating it on first flush."""
@@ -166,25 +180,23 @@ def preprocess_chrom(
         if not buf or (not force and len(buf) < chunk_size):
             return
         ys = build_y()
-        xs = np.stack(
-            [
-                np.zeros((input_length, 4), dtype="float32") if x is None else x
-                for x, _, _ in buf
-            ]
-        ).astype("float32")
+        xs = np.zeros((len(buf), input_length, 4), dtype="float32")
+        for i, (x, _, _) in enumerate(buf):
+            if x is not None:
+                xs[i] = x
         if h5_file is None:
             h5_file = h5py.File(hdf5_path, "w")
-            x_ds = _create_growable_dataset(h5_file, "x", xs.shape[1:], chunk_size)
-            y_ds = _create_growable_dataset(h5_file, "y", ys.shape[1:], chunk_size)
+            x_ds = _create_growable_dataset(h5_file, "x", xs.shape[1:])
+            y_ds = _create_growable_dataset(h5_file, "y", ys.shape[1:])
         _append_rows(x_ds, xs)
         _append_rows(y_ds, ys)
         total_rows += len(buf)
         print(f"Wrote {len(buf)} samples ({total_rows} total) to {hdf5_path}")
         buf = []
 
-    for _, row in df_tss.iterrows():
-        pos = int(row["pos"]) - 1  # 0-based
-        strand = row.get("strand", 1)
+    strands = df_tss["strand"] if "strand" in df_tss.columns else [1] * len(df_tss)
+    for pos, strand in zip(df_tss["pos"], strands):
+        pos = int(pos) - 1  # 0-based
         is_minus = strand in (-1, "-1", "-")
         bw_start = pos - half_out
 
@@ -202,9 +214,7 @@ def preprocess_chrom(
             buf.append((None, 0, is_minus))
         else:
             x = onehot_encode(seq_str)
-            if is_minus:
-                x = x[::-1, ::-1].copy()
-            buf.append((x, bw_start, is_minus))
+            buf.append((x[::-1, ::-1] if is_minus else x, bw_start, is_minus))
 
         if len(buf) >= chunk_size:
             flush()
@@ -249,9 +259,10 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument(
         "--chunk_size",
         type=int,
-        default=256,
-        help="Number of samples buffered in memory before each incremental write "
-        "to the chromosome's HDF5 file (default: %(default)s)",
+        default=64,
+        help="Number of samples buffered in memory, BigWig-read in one batch, and "
+        "appended to the chromosome's HDF5 file together; the y buffer is "
+        "chunk_size x output_length x n_tracks float32 (default: %(default)s)",
     )
     return parser
 

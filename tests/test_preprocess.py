@@ -51,6 +51,10 @@ def test_preprocess_uses_stranded_bigwigs_xforms_and_reverses_minus(tmp_path):
     )
 
     with h5py.File(out_dir / "chr1.h5", "r") as handle:
+        # One sample per HDF5 chunk: training reads random single rows, and a
+        # multi-row chunk would be decompressed whole for each of them.
+        assert handle["x"].chunks == (1, 4, 4)
+        assert handle["y"].chunks == (1, 4, 1)
         x = handle["x"][:]
         y = handle["y"][:]
 

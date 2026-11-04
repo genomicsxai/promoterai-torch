@@ -34,7 +34,7 @@ pull in HDF5/BigWig tooling or attribution libraries:
 | ----------- | ----------------------------------------------------- |
 | `train`     | Preprocess data, train from scratch, or fine-tune      |
 | `wandb`     | Weights & Biases logging (combine with `train`)        |
-| `interpret` | Run DeepLIFT/SHAP interpretation with tangermeme       |
+| `interpret` | DeepLIFT/SHAP references and logo plots (tangermeme)   |
 
 `uv add` is for installing into an existing project; for a
 cloned checkout with development dependencies, see
@@ -183,40 +183,63 @@ pip install "promoterai-torch[interpret]"
 uv add promoterai-torch --extra interpret
 ```
 
-The architecture uses named `nn.ReLU()` module instances (one per non-linearity) so it is compatible with [`tangermeme`](https://github.com/jmschrei/tangermeme)'s `deep_lift_shap`. Wrap the model to transpose the channels-first input expected by tangermeme and reduce the output to `(batch, 1)` (we average over positions and tracks in the demo script):
+`promoterai_torch.attribution.deep_lift_shap` computes DeepLIFT/SHAP attributions of
+the model's mean prediction with an engine written for this architecture. It gives
+the same attributions as [`tangermeme`](https://github.com/jmschrei/tangermeme)'s
+`deep_lift_shap` (same dinucleotide-shuffled references for a given `random_state`,
+same rescale rule), but the full published model fits on a 12 GB GPU:
 
 ```python
-import torch
-import torch.nn as nn
-from tangermeme.deep_lift_shap import deep_lift_shap
+from promoterai_torch.attribution import deep_lift_shap
 from promoterai_torch.utils import load_pretrained
 
 model, args = load_pretrained("model.pt")
-model.eval()
+model = model.to("cuda")
 
-class PromoterAIWrapper(nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, x):                           # x: (B, 4, L) channels-first
-        out = self.model(x.transpose(1, 2))         # PromoterAI expects (B, L, 4)
-        out = out[0].mean(dim=(1, 2)).unsqueeze(1)  # (B, 1) — mean over positions and tracks
-        return out
-
-wrapper = PromoterAIWrapper(model)
-
-# x: (B, 4, input_length) one-hot, channels-first
-x = torch.zeros(1, 4, args["input_length"])
-x[0, 0, :] = 1.0  # replace with your sequences
-
-attributions = deep_lift_shap(wrapper, x, n_shuffles=20, device="cuda", batch_size=1)
-# attributions: (B, 4, input_length) — per-position, per-base importance
+# X: (N, 4, input_length) one-hot, channels-first (tangermeme's layout)
+attributions, deltas = deep_lift_shap(
+    model, X,
+    head=0,             # which species head
+    tracks=None,        # or a list of track indices; the output is their mean
+    n_shuffles=20, random_state=0,
+    return_deltas=True, # |sum(attr) - (y(x) - y(ref))| per reference, ~1e-7 in float32
+)
+# attributions: (N, 4, input_length) on the CPU, already multiplied by X
+# (hypothetical=True returns every base's attribution instead)
 ```
+
+How many references (and, for very short sequences, how many sequences) go through
+the GPU per step is chosen to saturate it within the free device memory; pass
+`ref_chunk` / `batch_size` / `max_memory` to override it. `compile=True` fuses the
+elementwise work: `torch.compile` on CPUs and CUDA GPUs of compute capability 7.0+,
+and TorchScript's fuser on older GPUs (e.g. Pascal), where `torch.compile`'s Triton
+backend doesn't run. The Pascal path is measured below (~12% faster); the
+`torch.compile` GPU path is so far only validated for correctness on CPU, not
+benchmarked on a 7.0+ GPU.
+
+Full published model (24 blocks x 1024, 20,480 bp), one sequence x 20 shuffles,
+float32:
+
+| Hardware | Method | Time | Peak GPU memory |
+| --- | --- | --- | --- |
+| A100 80 GB, TF32 | `tangermeme.deep_lift_shap`, `batch_size=1` | ~92 s | ~71 GB |
+| TITAN X (Pascal) 12 GB | `tangermeme.deep_lift_shap` | out of memory | |
+| TITAN X (Pascal) 12 GB | `deep_lift_shap` | 96 s | 6.5 GB |
+| TITAN X (Pascal) 12 GB | `deep_lift_shap(compile=True)` | 86 s | 7.7 GB |
+| TITAN Xp 12 GB | `deep_lift_shap` | 78 s | 6.5 GB |
+| TITAN Xp 12 GB | `deep_lift_shap(compile=True)` | 70 s | 7.7 GB |
+
+`examples/deepliftshap_region.py` attributes a genomic region and plots it;
+`examples/benchmark_deep_lift_shap.py` compares the two implementations at reduced
+width.
 
 ![SFSWAP DeepLIFTSHAP](https://raw.githubusercontent.com/genomicsxai/promoterai-torch/main/examples/img/deepliftshap.png)
 
-Do note that calculating DeepLIFT/SHAP on this model is quite expensive: with TF32, `n_shuffles=20`, and `batch_size=1`, it takes ~92s/sequence with ~71GB VRAM used on an A100 80GB.
+The engine relies on PromoterAI's structure (ReLU as the only nonlinearity,
+eval-mode BatchNorm, row-wise ops). For other attribution targets or methods, the
+model still works with tangermeme directly: its non-linearities are distinct
+`nn.ReLU()` modules, as tangermeme requires. Wrap it to take `(B, 4, L)` and return
+`(B, n_targets)`, e.g. `model(x.transpose(1, 2))[0].mean(dim=(1, 2)).unsqueeze(1)`.
 
 ## Numerical equivalence
 

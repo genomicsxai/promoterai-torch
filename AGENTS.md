@@ -45,6 +45,7 @@ jobs where both runtimes can coexist in GPU memory.
 | `src/promoterai_torch/finetune.py`              | GTEx fine-tuning via `TwinModel`                                                      |
 | `src/promoterai_torch/score.py`                 | Variant effect scoring                                                                |
 | `src/promoterai_torch/incremental.py`           | Exact receptive-field-limited substitution scoring (fastISM-style), used by `score.py` and `benchmark.py` |
+| `src/promoterai_torch/attribution.py`           | `deep_lift_shap`: tangermeme-exact DeepLIFT/SHAP with a hand-written, memory-lean backward |
 | `src/promoterai_torch/cli.py`                   | Unified `promoterai-torch` entry point                                                |
 | `src/promoterai_torch/utils.py`                 | LR/WD scheduler, checkpoint, TF weight converter                                      |
 | `src/promoterai_torch/savedmodel.py`            | TensorFlow-free Keras SavedModel variable reader used by the converter                |
@@ -148,4 +149,5 @@ A weekly scheduled workflow (`tf-equivalence.yml`) also runs the toy-scale tests
 - **hg38 output tracks**: 498 (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq)
 - **Fine-tuning filter**: `in_cds==0`, `spliceai<0.05`, gene in outlier set (`p_under<0.01 or p_over<0.01`); train on odd chr 1–19, val on chr 21–22
 - **Incremental scoring** (`score.py --incremental`, the default): same-length substitutions are grouped by (chrom, pos, strand); each site's reference runs once (`incremental.reference_layers`) and each alt recomputes only the window its edit reaches through each block (`substitution_diffs`), exact vs `TwinModel` up to rounding (`tests/test_incremental.py`). `score.variant_diffs` is the shared entry point; `benchmark.py` calls it too (sharding multi-device runs by site, `benchmark.site_shards`), with `--no-incremental` in both CLIs. It relies on every op being position-wise or a depthwise conv in eval mode -- revisit it if the architecture gains pooling, attention, or any non-local op. Indels use full passes.
+- **DeepLIFT/SHAP** (`attribution.deep_lift_shap`): reproduces `tangermeme.deep_lift_shap` on the head-mean wrapper (tests/test_attribution.py, to ~1e-16 in float64 at toy scale; checked on the real hg38 model vs tangermeme on CPU to 2.6e-7 in float32). Its backward is written by hand for PromoterAI's ops -- any architecture change (new nonlinearity, non-eval BatchNorm, a non-row-wise op) needs a matching change there and in its tests. tangermeme is only needed for generating shuffled references. See "DeepLIFT/SHAP engine" in `notes/implementation.md`.
 - **Score output**: `np.tanh(diff.round(4))` ∈ [−1, 1]; thresholds ±0.1 / ±0.2 / ±0.5

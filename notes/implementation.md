@@ -35,6 +35,58 @@ class PromoterAIWrapper(nn.Module):
         return out[0].mean(dim=1)   # (B, n_tracks)
 ```
 
+## DeepLIFT/SHAP engine (`src/promoterai_torch/attribution.py`)
+
+`tangermeme.deep_lift_shap` keeps the full autograd graph for 2 rows (sequence and
+reference) per pair: ~26 GB per row at the published 24 x 1024 x 20480 scale, so it
+needs an 80 GB card (~71 GB, ~92 s per sequence at 20 shuffles on an A100 with TF32)
+and runs out of memory on 12 GB ones. `attribution.deep_lift_shap` computes the same
+numbers (same references for a given `random_state`, same rescale rule and
+hypothetical projection) with a hand-written backward, after Cherimoya's engine:
+
+- **Rule in closed form.** PromoterAI's only nonlinearities are ReLUs, where
+  tangermeme applies the rescale rule (secant multiplier, plain gradient when
+  |a_x - a_r| < 1e-6). Everything else (eval BatchNorm, depthwise conv, linear,
+  residuals, the head's mean/crop) is linear, so its ordinary transpose is exact.
+- **Sequence half only.** tangermeme's rule for the sequence row reads the
+  reference row's activations, never its gradient, and every op is row-wise, so the
+  backward runs over the k pairs, not 2k rows. The sequence's forward is computed
+  once and cached across reference chunks.
+- **Recompute instead of store.** The forward keeps only block outputs (L x C per
+  row per block); the backward recomputes each block's pre-ReLU FFN activations
+  (L x 4C, the dominant tensor) when it gets there, and adds each output head's
+  contribution when it reaches that shortcut layer.
+
+Verified: float64 agreement to ~1e-16 with tangermeme at toy scale (`tests/test_attribution.py`,
+including given references, hypothetical attributions, track subsets, batching and
+the planner); on the real hg38 model at full scale, float32 agreement with
+tangermeme (run on CPU, 66 GB RSS) to 2.6e-7 relative L2, and convergence deltas
+~1e-7.
+
+Step sizing (`_plan`): a fitted memory model (~n_blocks + 13 (L, C) activations per
+sequence, ~n_blocks + 16 per reference, +16 per step when compiled), capped where the
+GPU saturates (2^22 elements in a step's (L, C) layer; measurements next to
+`_SATURATION`). Bigger steps past that only cost memory: at width 1024, 2 references
+per step is 3% faster than 1 for +3 GiB. Only once all of a sequence's references fit
+in one step are sequences batched; on a TITAN Xp this gave no measurable speedup down
+to L=2048 at width 64 (20 references already saturate), so it matters only for very
+short inputs. An out-of-memory step is retried at half size.
+
+**Compiling on Pascal.** `torch.compile`'s GPU backend is Triton, which needs compute
+capability >= 7.0, so it can't run on the TITAN X/Xp (sm_61). TorchScript's NNC fuser
+generates CUDA through NVRTC and does run there: `compile=True` on such a GPU scripts
+just the rescale rule, the bulk of the elementwise work (one (L, 4C) rule: 9 ms fused
+vs 23 ms functional / 27 ms in place eagerly on a TITAN Xp). The eager rule runs in
+place to save memory, which is slower on the GPU than the functional one; the fused
+one is both faster and holds fewer temporaries than the functional one. End to end
+at the published scale (20 shuffles) that is 1.12x on both cards: TITAN Xp 78 -> 70 s,
+TITAN X 96 -> 86 s, for +1.2 GiB (the fused rule isn't in place). On CPU and
+newer GPUs, `compile=True` uses torch.compile with a raised recompile limit (block
+backward recompiles once per distinct dilation); on 16 CPU threads at 24 blocks x
+L=4096 it was 86 -> 58 s at width 256 but slower at width 64 (10 -> 13 s), after
+~45 s of compilation. The torch.compile *GPU* path (Triton, capability >= 7.0) has not
+been run yet -- no such GPU on the dev box; benchmark it before recommending it.
+
 ## Dependency layout
 
 - Core (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tqdm` — no TensorFlow

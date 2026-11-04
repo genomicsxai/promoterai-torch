@@ -1,4 +1,4 @@
-"""The prototype DeepLIFT/SHAP engine must reproduce tangermeme's deep_lift_shap."""
+"""promoterai_torch.attribution.deep_lift_shap must reproduce tangermeme's deep_lift_shap."""
 
 import pytest
 import torch
@@ -8,8 +8,8 @@ pytest.importorskip("tangermeme", reason="tangermeme not installed")
 
 from tangermeme.deep_lift_shap import deep_lift_shap as tm_deep_lift_shap  # noqa: E402
 
-from promoterai_torch import _deep_lift_shap_engine as engine  # noqa: E402
-from promoterai_torch._deep_lift_shap_engine import deep_lift_shap  # noqa: E402
+from promoterai_torch import attribution as engine  # noqa: E402
+from promoterai_torch.attribution import deep_lift_shap  # noqa: E402
 from promoterai_torch.architecture import PromoterAI  # noqa: E402
 
 
@@ -125,15 +125,26 @@ def test_engine_batching_matches_one_at_a_time(batch_size, ref_chunk):
 
 
 def test_plan():
-    model = _model(num_blocks=24, model_dim=1024, output_crop=0).float()
+    cpu, f32, GiB = torch.device("cpu"), torch.float32, 1 << 30
+    full = _model(num_blocks=24, model_dim=1024, output_crop=0).float()
     L, M = 20480, 20480 * 1024 * 4
-    # A 12 GB card after the weights: two references beside the sequence, one sequence a step.
-    assert engine._plan(model, L, 10, 20, torch.float32, torch.device("cpu"), 10 << 30) == (1, 2)
-    small = _model(num_blocks=24, model_dim=64, output_crop=0).float()
-    B, k = engine._plan(small, L, 100, 20, torch.float32, torch.device("cpu"), 10 << 30)
-    assert k == 20 and 1 < B < 100
+    # Published scale: one reference already saturates; 2 would fit in 10 GiB.
+    assert engine._plan(full, L, 10, 20, f32, cpu, 10 * GiB) == (1, 1)
     with pytest.warns(UserWarning, match="budget"):
-        assert engine._plan(model, L, 1, 20, torch.float32, torch.device("cpu"), M) == (1, 1)
+        assert engine._plan(full, L, 1, 20, f32, cpu, M) == (1, 1)
+    # Narrow model: references per step up to saturation...
+    narrow = _model(num_blocks=24, model_dim=64, output_crop=0).float()
+    assert engine._plan(narrow, L, 100, 20, f32, cpu, 10 * GiB) == (1, 4)
+    # ... or to the memory budget, whichever is smaller.
+    assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB // 2)[1] == 1
+    # Short sequences: all references fit, so sequences are batched to saturation.
+    assert engine._plan(narrow, 2048, 100, 20, f32, cpu, 10 * GiB) == (2, 20)
+    assert engine._plan(narrow, 512, 100, 20, f32, cpu, 10 * GiB) == (7, 20)
+    assert engine._plan(narrow, 512, 3, 20, f32, cpu, 10 * GiB) == (3, 20)
+    # Compiled passes budget more per step.
+    assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB, compile=True)[1] == 3 < (
+        engine._plan(narrow, L, 100, 20, f32, cpu, GiB)[1]
+    )
 
 
 def test_engine_retries_smaller_after_oom(monkeypatch):
@@ -180,3 +191,15 @@ def test_rescale_variants_agree():
         warnings.simplefilter("ignore")
         scripted = torch.jit.script(engine._rescale)
     torch.testing.assert_close(scripted(G, a_x, a_r), expected)
+
+
+def test_input_validation():
+    model = _model()
+    with pytest.raises(ValueError, match="one-hot"):
+        deep_lift_shap(model, _X(1, 256).transpose(1, 2))
+    with pytest.raises(ValueError, match="head"):
+        deep_lift_shap(model, _X(1, 256), head=2)
+    with pytest.raises(ValueError, match="references"):
+        deep_lift_shap(model, _X(2, 256), references=_X(3, 256).unsqueeze(0))
+    with pytest.raises(TypeError, match="PromoterAI"):
+        deep_lift_shap(_Wrapper(model), _X(1, 256))

@@ -1,4 +1,4 @@
-"""GPU benchmark: tangermeme deep_lift_shap vs the prototype engine.
+"""GPU benchmark: tangermeme's deep_lift_shap vs promoterai_torch.attribution.deep_lift_shap.
 
 Random-weight PromoterAI at the published depth and length (24 blocks, L=20480,
 4096-bp output, 498 tracks) and reduced widths, one sequence x 20 shuffles. For
@@ -6,17 +6,21 @@ each width, tangermeme runs at increasing batch sizes and the engine at increasi
 ref_chunk until either runs out of memory; reports time, peak CUDA memory, and the
 attributions' relative L2 difference.
 
-    CUDA_VISIBLE_DEVICES=1 python examples/dls_engine_benchmark/benchmark_gpu.py --widths 64,128,256
+    CUDA_VISIBLE_DEVICES=1 python examples/benchmark_deep_lift_shap.py --widths 64,128,256
+
+Engine "auto" is the default batch_size/ref_chunk planning. The engine's automatic
+out-of-memory retry is turned into a failure here, so each row is one setting.
 """
-import argparse, time, gc, torch
+import argparse, time, gc, warnings, torch
 from torch import nn
 from tangermeme.deep_lift_shap import deep_lift_shap as tm_dls
-from promoterai_torch._deep_lift_shap_engine import deep_lift_shap as engine_dls
+from promoterai_torch.attribution import deep_lift_shap as engine_dls
 from promoterai_torch.architecture import PromoterAI
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--widths", default="64,128,256", help="comma-separated model_dim values")
 cli = parser.parse_args()
+warnings.filterwarnings("error", message="out of memory")
 dev = torch.device("cuda:0")
 L, K = 20480, 20
 widths = [int(w) for w in cli.widths.split(",")]
@@ -30,7 +34,7 @@ def run(fn):
     torch.cuda.synchronize(); t0 = time.perf_counter()
     try:
         out = fn()
-    except torch.OutOfMemoryError:
+    except (torch.OutOfMemoryError, UserWarning):
         return None, None, None
     torch.cuda.synchronize()
     return out, time.perf_counter() - t0, torch.cuda.max_memory_allocated() / 2**30
@@ -49,11 +53,11 @@ for C in widths:
         print(f"  C={C:4d} tangermeme batch_size={bs:2d}: " + ("OOM" if t is None else f"{t:6.1f} s  peak {mem:5.2f} GiB"), flush=True)
         if t is not None and (best_tm is None or t < best_tm[1]): best_tm = (a, t, mem, bs)
         if t is None: break
-    for rc in (1, 2, 4, 10, 20):
+    for rc in (1, 2, 4, 10, 20, None):
         a, t, mem = run(lambda: engine_dls(model, X, n_shuffles=K, random_state=0, ref_chunk=rc, device=dev))
-        print(f"  C={C:4d} engine    ref_chunk={rc:2d}: " + ("OOM" if t is None else f"{t:6.1f} s  peak {mem:5.2f} GiB"), flush=True)
+        print(f"  C={C:4d} engine    ref_chunk={rc or 'auto':>4}: " + ("OOM" if t is None else f"{t:6.1f} s  peak {mem:5.2f} GiB"), flush=True)
         if t is not None and (best_en is None or t < best_en[1]): best_en = (a, t, mem, rc)
-        if t is None: break
+        if t is None and rc is not None: continue
     if best_tm and best_en:
         rel = float((best_en[0] - best_tm[0]).norm() / best_tm[0].norm())
         print(f"  C={C:4d} SUMMARY best tangermeme {best_tm[1]:.1f} s (bs={best_tm[3]}, {best_tm[2]:.2f} GiB) vs engine {best_en[1]:.1f} s "

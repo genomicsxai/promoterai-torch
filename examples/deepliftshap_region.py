@@ -6,10 +6,13 @@ Usage:
         --model_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \\
         [--fasta examples/data/hg38.fa] \\
         [--chrom chr12] [--start 131710989] [--end 131711189] \\
-        [--n_shuffles 20] [--device cpu] [--output examples/img/deepliftshap.png]
+        [--n_shuffles 20] [--tracks 0 5 7] [--compile] [--device cpu] \\
+        [--output examples/img/deepliftshap.png]
 
 The script extracts a full-length input window centered on the specified region,
-runs DeepLIFT/SHAP, and produces a two-panel figure:
+runs DeepLIFT/SHAP (promoterai_torch.attribution.deep_lift_shap) on the mean
+prediction of the first head over its output window and the chosen tracks (default
+all), and produces a two-panel figure:
   - Top: per-position contribution sum across the full input window
   - Bottom: sequence logo (contribution × one-hot) zoomed to the region of interest
 """
@@ -22,25 +25,11 @@ import numpy as np
 import pyfaidx
 import torch
 from matplotlib import gridspec
-from tangermeme.deep_lift_shap import deep_lift_shap
 from tangermeme.plot import plot_logo
-from torch import nn
 
+from promoterai_torch.attribution import deep_lift_shap
 from promoterai_torch.dataset import onehot_encode
 from promoterai_torch.utils import load_pretrained
-
-
-class _Wrapper(nn.Module):
-    """Adapt PromoterAI for tangermeme: (B, 4, L) in → (B, n_tracks) out."""
-
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, x):
-        # (B, 1) — mean over positions and tracks
-        out = self.model(x.transpose(1, 2))[0].mean(dim=(1, 2)).unsqueeze(1)
-        return out
 
 
 def main():
@@ -68,7 +57,13 @@ def main():
     )
     parser.add_argument("--input_length", type=int, default=20480)
     parser.add_argument("--n_shuffles", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--random_state", type=int, default=0)
+    parser.add_argument(
+        "--tracks", type=int, nargs="+", default=None, help="track indices to attribute (default all)"
+    )
+    parser.add_argument(
+        "--compile", action="store_true", help="fuse elementwise work (torch.compile / TorchScript)"
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default="examples/img/deepliftshap.png")
     args = parser.parse_args()
@@ -98,23 +93,22 @@ def main():
     model, _ = load_pretrained(args.model_checkpoint)
     model = model.to(args.device)
     model.eval()
-    wrapper = _Wrapper(model)
-
-    # ── Predict to get output delta ─────────────────────────────────────────
 
     # ── Run DeepLIFT/SHAP, capturing convergence deltas ──────────────────────
     print(f"Running DeepLIFT/SHAP ({args.n_shuffles} shuffles) on {args.device}…")
-    attrs = deep_lift_shap(
-        wrapper,
+    attrs, deltas = deep_lift_shap(
+        model,
         x,
+        tracks=args.tracks,
         n_shuffles=args.n_shuffles,
-        batch_size=args.batch_size,
+        random_state=args.random_state,
+        compile=args.compile,
+        return_deltas=True,
         device=args.device,
-        print_convergence_deltas=True,
     )
+    print(f"max convergence delta: {float(deltas.max()):.2e}")
 
-    # Move results to CPU and free GPU memory before plotting
-    attrs = attrs.cpu()
+    # Free GPU memory before plotting (attributions are returned on the CPU)
     if args.device != "cpu":
         model.cpu()
         torch.cuda.empty_cache()

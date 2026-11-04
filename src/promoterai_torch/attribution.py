@@ -1,7 +1,8 @@
 """
-A memory-lean DeepLIFT/SHAP engine for PromoterAI.
+DeepLIFT/SHAP attributions for PromoterAI: `deep_lift_shap`.
 
-Computes the same attributions as::
+A memory-lean engine written for this architecture. It computes the same
+attributions as::
 
     tangermeme.deep_lift_shap.deep_lift_shap(wrapper, X, n_shuffles=K, random_state=s)
 
@@ -44,7 +45,6 @@ import warnings
 
 import torch
 import torch.nn.functional as F
-from tangermeme.ersatz import dinucleotide_shuffle
 
 from promoterai_torch.architecture import MetaFormerBlock, PromoterAI
 
@@ -215,40 +215,56 @@ def _available_memory(device: torch.device) -> int:
 
 # Activations, in units of one (L, C) tensor, that `_attribute` holds at its peak per
 # sequence (cached forward + pre-ReLU recompute) and per reference (forward, G and the
-# block backward's transients). Fitted on a TITAN X; see `_plan`.
-_PER_SEQ_EXTRA, _PER_REF_EXTRA = 13, 16
+# block backward's transients), and what compiling adds per step. Fitted to peak CUDA
+# memory on a TITAN X; see `_plan`.
+_PER_SEQ_EXTRA, _PER_REF_EXTRA, _COMPILE_EXTRA = 13, 16, 16
+# Steps stop growing once a step's (L, C) layer has this many elements: beyond it the
+# GPU is saturated and larger steps only cost memory. Measured on a TITAN Xp, 32
+# sequences x 20 shuffles at 24 blocks: width 64 x L=20480, 1 reference a step (1.3M)
+# 84 s, 13 or 20 a step 69/68 s; width 64 x L=2048, 20 a step (2.6M) 6.6 s with 1 or
+# 7 sequences a step; at the published scale 2 references a step (42M) vs 1 is 3%
+# faster on a TITAN X.
+_SATURATION = 1 << 22
 
 
-def _plan(model, L, n_seqs, n_refs, dtype, device, max_memory=None):
-    """(batch_size, ref_chunk) that fit in max_memory bytes (default 85% of free).
+def _plan(model, L, n_seqs, n_refs, dtype, device, max_memory=None, compile=False):
+    """(batch_size, ref_chunk) for `deep_lift_shap`'s defaults.
 
-    A sequence costs ~(n_blocks + 13) (L, C) activations: its cached forward
-    (n_blocks + 2 incl. the stem's pre-ReLU), its pre-ReLU recompute (4C wide) and
-    head projections. A reference costs ~(n_blocks + 16): its forward, G, its
-    pre-ReLU recompute, the rescaled gradient, the rule's temporaries and the FFN/conv
-    transposes. Fitted to peak CUDA memory at 24 blocks x widths 64-1024 x L=20480
-    (measured ~n_blocks + 10 and + 15) on a TITAN X. The
-    reference chunk is the largest that fits beside one sequence; only when all of a
-    sequence's references fit are several sequences batched.
+    Steps grow until they saturate the device (`_SATURATION`) or would exceed
+    max_memory bytes (default 85% of free memory): first in references per
+    sequence; only once all of a sequence's references fit in one step, in
+    sequences per step.
+
+    Memory model, fitted to peak CUDA memory at 24 blocks x widths 64-1024 x
+    L=20480 (measured ~n_blocks + 10 and + 15): a sequence costs ~(n_blocks + 13)
+    (L, C) activations -- its cached forward (n_blocks + 2 incl. the stem's
+    pre-ReLU), its pre-ReLU recompute (4C wide) and head projections; a reference
+    ~(n_blocks + 16) -- its forward, G, its pre-ReLU recompute, the rescaled
+    gradient, the rule's temporaries and the FFN/conv transposes. Compiled passes
+    keep ~16 more per step (the fused rule isn't in place).
     """
     if max_memory is None:
         max_memory = int(0.85 * _available_memory(device))
     C = model.stem.out_channels
     M = L * C * torch.tensor([], dtype=dtype).element_size()
     nb = len(model.blocks)
-    per_seq, per_ref = (nb + _PER_SEQ_EXTRA) * M, (nb + _PER_REF_EXTRA) * M
-    k = int((max_memory - per_seq) // per_ref)
-    if k < 1:
+    per_seq = (nb + _PER_SEQ_EXTRA + (_COMPILE_EXTRA if compile else 0)) * M
+    per_ref = (nb + _PER_REF_EXTRA) * M
+    k_fit = int((max_memory - per_seq) // per_ref)
+    if k_fit < 1:
         warnings.warn(
             f"one sequence and one reference need ~{(per_seq + per_ref) / 2**30:.1f} GiB, "
             f"more than the {max_memory / 2**30:.1f} GiB budget; trying anyway",
             stacklevel=3,
         )
         return 1, 1
+    k_sat = -(-_SATURATION // (L * C))
+    k = min(k_fit, k_sat, n_refs)
     if k < n_refs:
         return 1, k
-    B = int(max_memory // (per_seq + n_refs * per_ref))
-    return max(1, min(B, n_seqs)), n_refs
+    B_fit = int(max_memory // (per_seq + n_refs * per_ref))
+    B_sat = -(-k_sat // n_refs)
+    return max(1, min(B_fit, B_sat, n_seqs)), n_refs
 
 
 # --------------------------------------------------------------------- driver
@@ -256,6 +272,13 @@ def _plan(model, L, n_seqs, n_refs, dtype, device, max_memory=None):
 
 def _shuffles(x, n, random_state):
     """tangermeme's references for x (1, 4, L): dinucleotide shuffles seeded random_state + j."""
+    try:
+        from tangermeme.ersatz import dinucleotide_shuffle
+    except ImportError as e:  # pragma: no cover - depends on the environment
+        raise ImportError(
+            "generating shuffled references needs tangermeme: pip install "
+            "'promoterai-torch[interpret]', or pass references="
+        ) from e
     return torch.cat(
         [
             dinucleotide_shuffle(x, n=1, random_state=None if random_state is None else random_state + j)[:, 0]
@@ -291,6 +314,7 @@ def _passes(compile: bool, device: torch.device):
 def deep_lift_shap(
     model: PromoterAI,
     X: torch.Tensor,
+    *,
     head: int = 0,
     tracks=None,
     n_shuffles: int = 20,
@@ -304,28 +328,76 @@ def deep_lift_shap(
     compile: bool = False,
     device: str | torch.device | None = None,
 ):
-    """DeepLIFT/SHAP attributions for one-hot X (N, 4, L) (tangermeme's layout).
+    """DeepLIFT/SHAP attributions of a PromoterAI prediction for one-hot sequences.
 
-    The attributed output is the mean of head `head`'s prediction over its output
-    window and over `tracks` (indices into the head's tracks; default all).
-    References are dinucleotide shuffles drawn with seed `random_state + j` for the
-    j-th, as tangermeme does, or `references` (N, n_refs, 4, L).
+    Exactly tangermeme's ``deep_lift_shap`` (dinucleotide-shuffled references,
+    rescale rule, hypothetical-attribution projection) for the mean of the model's
+    prediction, but in a fraction of the memory and time; see the module docstring.
 
-    `batch_size` sequences are processed per step, each with `ref_chunk` of its
-    references; both default to what fits in `max_memory` bytes (default 85% of the
-    device's free memory), and a step that runs out of memory is retried at half the
-    size. `compile=True` runs the passes through torch.compile (needs a CPU or a
-    CUDA GPU of capability >= 7.0; otherwise warns and runs eagerly).
+    Parameters
+    ----------
+    model : PromoterAI
+        Run in eval mode (BatchNorm uses its running statistics).
+    X : tensor (N, 4, L)
+        One-hot sequences, channels first as in tangermeme (``model`` takes
+        ``X.transpose(1, 2)``).
+    head : int
+        Which output head (species) to attribute.
+    tracks : int or sequence of int, optional
+        Indices into that head's tracks; the attributed output is the mean
+        prediction over the head's output window and these tracks (default all).
+    n_shuffles : int
+        Number of dinucleotide-shuffled references per sequence; the j-th is drawn
+        with seed ``random_state + j``, as tangermeme does (needs tangermeme).
+    references : tensor (N, n_refs, 4, L), optional
+        References to use instead of shuffles.
+    random_state : int, optional
+    batch_size, ref_chunk : int, optional
+        Sequences per step and references per sequence per step. Default: what
+        fits in ``max_memory``; a step that runs out of memory is retried at half
+        the size. Larger steps are faster for small models / short sequences; at the
+        published scale one reference per step already saturates the GPU.
+    max_memory : int, optional
+        Byte budget for ``batch_size`` / ``ref_chunk``; default 85% of the device's
+        free memory.
+    hypothetical : bool
+        Return hypothetical attributions (every base at every position) instead of
+        multiplying by ``X``.
+    return_deltas : bool
+        Also return convergence deltas ``|sum(attr_j) - (y(x) - y(r_j))|`` per
+        reference, (N, n_refs); near float rounding if the rule was applied
+        exactly.
+    compile : bool
+        Fuse the elementwise work: torch.compile on CPU and CUDA capability >= 7.0
+        (first call compiles for up to a minute), TorchScript's fuser for the
+        rescale rule on older GPUs such as Pascal, where Triton can't run.
+    device : optional
+        Defaults to the model's device.
 
-    Returns attributions (N, 4, L) (times X unless `hypothetical`) on the CPU, plus
-    convergence deltas |sum(attr) - (y(x) - y(ref))| (N, n_refs) if `return_deltas`.
+    Returns
+    -------
+    attributions : tensor (N, 4, L) on the CPU, in the model's dtype
+    deltas : tensor (N, n_refs), if ``return_deltas``
     """
+    if not isinstance(model, PromoterAI):
+        raise TypeError(f"model must be a PromoterAI, got {type(model).__name__}")
+    if X.ndim != 3 or X.shape[1] != 4:
+        raise ValueError(f"X must be one-hot (N, 4, L), got shape {tuple(X.shape)}")
+    if not 0 <= head < len(model.output_heads):
+        raise ValueError(f"head must be in [0, {len(model.output_heads)}), got {head}")
+    if references is not None and (
+        references.ndim != 4 or references.shape[0] != X.shape[0] or references.shape[2:] != X.shape[1:]
+    ):
+        raise ValueError(
+            f"references must be (N, n_refs, 4, L) = ({X.shape[0]}, n_refs, 4, {X.shape[2]}), "
+            f"got {tuple(references.shape)}"
+        )
     device = torch.device(device) if device is not None else next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     model = model.eval().to(device)
     N, _, L = X.shape
     K = references.shape[1] if references is not None else n_shuffles
-    plan_B, plan_k = _plan(model, L, N, K, dtype, device, max_memory)
+    plan_B, plan_k = _plan(model, L, N, K, dtype, device, max_memory, compile)
     k = min(ref_chunk or plan_k, K)
     B = batch_size or (plan_B if k == K else 1)
     lo, hi, w = _head_weights(model, head, tracks, L, dtype, device)

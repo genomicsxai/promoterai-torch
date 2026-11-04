@@ -44,6 +44,7 @@ jobs where both runtimes can coexist in GPU memory.
 | `src/promoterai_torch/train.py`                 | DDP training loop                                                                     |
 | `src/promoterai_torch/finetune.py`              | GTEx fine-tuning via `TwinModel`                                                      |
 | `src/promoterai_torch/score.py`                 | Variant effect scoring                                                                |
+| `src/promoterai_torch/incremental.py`           | Exact receptive-field-limited substitution scoring (fastISM-style), used by `score.py` |
 | `src/promoterai_torch/cli.py`                   | Unified `promoterai-torch` entry point                                                |
 | `src/promoterai_torch/utils.py`                 | LR/WD scheduler, checkpoint, TF weight converter                                      |
 | `src/promoterai_torch/savedmodel.py`            | TensorFlow-free Keras SavedModel variable reader used by the converter                |
@@ -144,4 +145,5 @@ A weekly scheduled workflow (`tf-equivalence.yml`) also runs the toy-scale tests
 
 - **hg38 output tracks**: 498 (histone marks, TF ChIP-seq, ATAC-seq, RNA-seq)
 - **Fine-tuning filter**: `in_cds==0`, `spliceai<0.05`, gene in outlier set (`p_under<0.01 or p_over<0.01`); train on odd chr 1–19, val on chr 21–22
+- **Incremental scoring** (`score.py --incremental`, the default): same-length substitutions are grouped by (chrom, pos, strand); each site's reference runs once (`incremental.reference_layers`) and each alt recomputes only the window its edit reaches through each block (`substitution_diffs`), exact vs `TwinModel` up to rounding (`tests/test_incremental.py`). It relies on every op being position-wise or a depthwise conv in eval mode -- revisit it if the architecture gains pooling, attention, or any non-local op. Indels use full passes.
 - **Score output**: `np.tanh(diff.round(4))` ∈ [−1, 1]; thresholds ±0.1 / ±0.2 / ±0.5

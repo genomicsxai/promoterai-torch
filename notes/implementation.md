@@ -350,6 +350,32 @@ to `SLURM_CPUS_PER_TASK`, else `len(os.sched_getaffinity(0))` -- never
 job. Threads share one ~2 GiB y buffer where processes each hold their own, so
 for many cores prefer fewer chromosomes in flight with more threads each.
 
+## Incremental (fastISM-style) substitution scoring (`src/promoterai_torch/incremental.py`)
+
+PromoterAI's ops are position-wise (kernel-1 stem, eval BatchNorm, FFN, head
+projections + ReLU) or kernel-5 dilated depthwise convs, so an edit on [lo, hi)
+changes block b's output only on [lo, hi) widened by 2*d_i on each side for every
+block i <= b. Summed over the 24 published blocks, that is ~12% of the positions a
+full pass computes, and `TwinModel`'s mean(head(alt) - head(ref)) is exactly zero
+outside it. `score.py` therefore groups same-length substitutions by site, caches the
+reference's 25 layer outputs (~2 GB fp32 at L=20480, C=1024), and recomputes each
+alt's window per block, zero-padding the conv input only where the window runs past
+the true sequence ends (padding='same' pads bn1's output). The edit span comes from
+where x_ref and x_alt differ, so strand flips, MNVs, N-padded edges and skipped
+(all-zero placeholder) variants need no special cases.
+
+tangermeme's generic fastISM (`saturation_mutagenesis(fast=True)`) classifies the
+whole backbone as local but did not help here: it silently skips jobs that would take
+< 30 s without it (one site is ~4 edits) and, at full width, caches every
+intermediate including the 4096-wide FFN activations and ran out of memory on a 12 GB
+GPU, falling back to the slow path after the failed attempt. It also targets ISM
+over a region of one fixed window, while variant scoring centers a window on each
+variant.
+
+Measured: 3 SNVs at one site on the real hg38_finetune model, 4.5x faster on a TITAN
+Xp (2.23 -> 0.57 s/variant), max |diff - TwinModel| 1.5e-8; 150 TERT SNVs through
+the CLI, 527 -> 100 s with 150/150 identical scores.
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

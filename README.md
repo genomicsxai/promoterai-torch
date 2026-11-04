@@ -231,7 +231,8 @@ float32:
 
 `examples/deepliftshap_region.py` attributes a genomic region and plots it;
 `examples/benchmark_deep_lift_shap.py` compares the two implementations at reduced
-width.
+width; `examples/benchmark_deep_lift_shap_compile.py` times eager vs `compile=True`
+on a real checkpoint.
 
 ![SFSWAP DeepLIFTSHAP](https://raw.githubusercontent.com/genomicsxai/promoterai-torch/main/examples/img/deepliftshap.png)
 

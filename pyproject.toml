@@ -70,6 +70,13 @@ tf = [
 ]
 publish = ["build>=1.2", "twine>=5.0"]
 dev = [{ include-group = "test" }, { include-group = "publish" }]
+# Optional PyTorch build selection for uv users (see README "Choosing a PyTorch
+# build"). Without one of these, torch comes from PyPI (CUDA 13.0 on Linux,
+# GPUs sm_75+). These are dependency groups, not extras, so they never appear in
+# the published package's metadata, where they would do nothing under pip.
+cu126 = ["torch>=2.1"] # CUDA 12.6 build: also supports Maxwell/Pascal/Volta (sm_50-sm_70)
+cu130 = ["torch>=2.1"] # CUDA 13.0 build from the PyTorch index (sm_75+)
+cpu = ["torch>=2.1"]   # CPU-only build: no CUDA libraries downloaded
 
 [project.scripts]
 promoterai-torch = "promoterai_torch.cli:main"
@@ -92,3 +99,31 @@ only-include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.uv]
+# At most one PyTorch build group per environment.
+conflicts = [
+    [{ group = "cu126" }, { group = "cu130" }, { group = "cpu" }],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", group = "cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-cu130", group = "cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-cpu", group = "cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

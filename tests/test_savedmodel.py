@@ -130,3 +130,18 @@ def test_reader_matches_tf_keras_on_real_savedmodel(keras_savedmodel_path):
     ref = {v.name.removesuffix(":0"): v.numpy() for v in reloaded.weights}
 
     _assert_same_weights(read_savedmodel_variables(keras_savedmodel_path), ref)
+
+
+def test_convert_tf_weights_raises_on_unconverted_tensor(tmp_path, monkeypatch):
+    """A PyTorch tensor with no Keras source must fail loudly, not stay random/meta."""
+    import promoterai_torch.savedmodel as savedmodel
+    from promoterai_torch.utils import convert_tf_weights
+
+    def drop_one_bn_stat(path):
+        weights = read_savedmodel_variables(path)
+        del weights["meta_former_block/batch_normalization/moving_variance"]
+        return weights
+
+    monkeypatch.setattr(savedmodel, "read_savedmodel_variables", drop_one_bn_stat)
+    with pytest.raises(KeyError, match="moving_variance"):
+        convert_tf_weights(TOY, str(tmp_path / "toy.pt"))

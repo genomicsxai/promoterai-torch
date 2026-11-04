@@ -376,6 +376,17 @@ Measured: 3 SNVs at one site on the real hg38_finetune model, 4.5x faster on a T
 Xp (2.23 -> 0.57 s/variant), max |diff - TwinModel| 1.5e-8; 150 TERT SNVs through
 the CLI, 527 -> 100 s with 150/150 identical scores.
 
+The paper benchmark (`benchmark.score_variants`) goes through the same
+`score.variant_diffs`. All seven benchmark TSVs are substitutions; most have ~1.0
+variant per site (GTEx/UKBB/GEL/MPRA_eQTL), the saturation sets 1.7 (MPRA) and 2.4
+(CAGI5). On 100-variant subsets, hg38_finetune, end to end including model
+load: GTEx_outlier 351 -> 158 s (TITAN Xp), CAGI5_saturation
+399 -> 140 s (TITAN X), identical scores and AUROCs. So even at ~1 variant per
+site it measured 2.2x, a bit more than the ~1.8x expected from the window
+arithmetic (not investigated). Multi-device runs used to
+split rows with `np.array_split`, which can cut a site across shards; they now
+split whole sites (`site_shards`), so each site's reference pass happens once.
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

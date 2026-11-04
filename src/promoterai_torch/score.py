@@ -99,6 +99,69 @@ def _score_sites(model, sites: DataLoader, device, diffs: np.ndarray, verbose: b
             del layers
 
 
+@torch.no_grad()
+def variant_diffs(
+    base_model,
+    df_var: pd.DataFrame,
+    fasta_file,
+    input_length: int,
+    *,
+    device,
+    batch_size: int = 2,
+    num_workers: int = 0,
+    incremental: bool = True,
+    twin_model=None,
+    verbose: bool = False,
+) -> np.ndarray:
+    """TwinModel diffs mean(head0(alt) - head0(ref)) for every row of df_var, float32.
+
+    With `incremental`, same-length substitutions are grouped by site and scored
+    from one cached reference pass each (`incremental.substitution_diffs`); the
+    rest (indels, or everything without `incremental`) use full ref/alt passes
+    through `twin_model` (default: ``TwinModel(base_model)``). Callers apply
+    ``np.tanh(diffs.round(4))`` for scores.
+    """
+    device = torch.device(device)
+    if twin_model is None:
+        twin_model = TwinModel(base_model).to(device).eval()
+    dataset = VariantDataset(df_var, str(fasta_file), input_length)
+
+    # float32, like the model's outputs, so rounding matches the full-pass path.
+    diffs = np.full(len(df_var), np.nan, dtype=np.float32)
+    if incremental:
+        groups, full_idx = _site_groups(df_var)
+    else:
+        groups, full_idx = [], np.arange(len(df_var))
+
+    if groups:
+        sites = DataLoader(
+            _SiteDataset(dataset, groups),
+            batch_size=None,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=_identity,
+        )
+        _score_sites(base_model, sites, device, diffs, verbose)
+
+    if len(full_idx):
+        loader = DataLoader(
+            Subset(dataset, full_idx.tolist()),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_variant,
+        )
+        from tqdm import tqdm
+
+        full_diffs = []
+        for (x_ref, x_alt), _ in tqdm(
+            loader, desc="Scoring variants", unit="batch", disable=not verbose
+        ):
+            full_diffs.append(twin_model(x_ref.to(device), x_alt.to(device)).cpu().numpy())
+        diffs[full_idx] = np.concatenate(full_diffs)
+    return diffs
+
+
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     """Build (or populate, when composed into the unified CLI) the score parser."""
     if parser is None:
@@ -190,44 +253,18 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     args.input_length = resolve_input_length(args.input_length, base_args)
     df_var = pd.read_csv(args.var_file, sep="\t")
-    dataset = VariantDataset(df_var, args.fasta_file, args.input_length)
-
-    # float32, like the model's outputs, so rounding below matches the full-pass path.
-    diffs = np.full(len(df_var), np.nan, dtype=np.float32)
-    if args.incremental:
-        groups, full_idx = _site_groups(df_var)
-    else:
-        groups, full_idx = [], np.arange(len(df_var))
-
-    if groups:
-        sites = DataLoader(
-            _SiteDataset(dataset, groups),
-            batch_size=None,
-            shuffle=False,
-            num_workers=args.num_workers,
-            collate_fn=_identity,
-        )
-        _score_sites(base_model, sites, device, diffs, args.verbose)
-
-    if len(full_idx):
-        loader = DataLoader(
-            Subset(dataset, full_idx.tolist()),
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            collate_fn=collate_variant,
-        )
-        full_diffs = []
-        with torch.no_grad():
-            from tqdm import tqdm
-
-            batches = tqdm(
-                loader, desc="Scoring variants", unit="batch", disable=not args.verbose
-            )
-            for (x_ref, x_alt), _ in batches:
-                diff = twin_model(x_ref.to(device), x_alt.to(device))
-                full_diffs.append(diff.cpu().numpy())
-        diffs[full_idx] = np.concatenate(full_diffs)
+    diffs = variant_diffs(
+        base_model,
+        df_var,
+        args.fasta_file,
+        args.input_length,
+        device=device,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        incremental=args.incremental,
+        twin_model=twin_model,
+        verbose=args.verbose,
+    )
 
     scores = np.tanh(diffs.round(4))
     df_var["score"] = scores

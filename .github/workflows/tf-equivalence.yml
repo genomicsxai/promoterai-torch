@@ -3,7 +3,7 @@ name: TF Equivalence Tests
 # The default Tests workflow (tests.yml) never installs tensorflow/tf-keras, so
 # TF-dependent tests (Keras -> PyTorch weight conversion, cross-framework
 # gradient/optimizer equivalence) are always skipped there. This workflow installs
-# the `convert` extra and runs the full suite so those tests actually execute,
+# the `tf` dependency group and runs the full suite so those tests actually execute,
 # on a schedule rather than per-PR since TensorFlow adds several minutes of
 # install time.
 
@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --group dev --extra convert
+        run: uv sync --group dev --group tf
 
       - name: Run tests
         run: uv run pytest tests/ -v

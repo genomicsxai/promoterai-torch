@@ -2308,10 +2308,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-convert = [
-    { name = "tensorflow", marker = "python_full_version < '3.14'" },
-    { name = "tf-keras", marker = "python_full_version < '3.14'" },
-]
 interpret = [
     { name = "tangermeme" },
 ]
@@ -2345,6 +2341,10 @@ test = [
     { name = "pytest" },
     { name = "tangermeme" },
 ]
+tf = [
+    { name = "tensorflow", marker = "python_full_version < '3.14'" },
+    { name = "tf-keras", marker = "python_full_version < '3.14'" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -2355,13 +2355,11 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.0" },
     { name = "pyfaidx", specifier = ">=0.8" },
     { name = "tangermeme", marker = "extra == 'interpret'", specifier = ">=1.6" },
-    { name = "tensorflow", marker = "python_full_version < '3.14' and extra == 'convert'" },
-    { name = "tf-keras", marker = "python_full_version < '3.14' and extra == 'convert'" },
     { name = "torch", specifier = ">=2.1" },
     { name = "tqdm", specifier = ">=4.0" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.16" },
 ]
-provides-extras = ["convert", "train", "interpret", "wandb"]
+provides-extras = ["train", "interpret", "wandb"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2381,6 +2379,10 @@ test = [
     { name = "h5py", specifier = ">=3.0" },
     { name = "pytest", specifier = ">=8" },
     { name = "tangermeme", specifier = ">=1.6" },
+]
+tf = [
+    { name = "tensorflow", marker = "python_full_version < '3.14'" },
+    { name = "tf-keras", marker = "python_full_version < '3.14'" },
 ]
 
 [[package]]

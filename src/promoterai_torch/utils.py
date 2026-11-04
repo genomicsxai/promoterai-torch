@@ -336,6 +336,10 @@ def convert_tf_weights(
     """
     Convert a pretrained PromoterAI Keras SavedModel to a PyTorch checkpoint.
 
+    Weights are read directly from the SavedModel directory by
+    `promoterai_torch.savedmodel.read_savedmodel_variables`, so TensorFlow is
+    not required.
+
     Architecture (num_blocks, model_dim, output_dims, shortcut_layer_freq) is inferred
     from weight names. output_crop is derived from input_length - output_length when
     both are provided. input_length and output_length are stored as metadata.
@@ -349,21 +353,12 @@ def convert_tf_weights(
     """
     import re
 
-    try:
-        import tf_keras
-    except ImportError:
-        raise ImportError(
-            "tensorflow and tf-keras are required for weight conversion. "
-            "Install with: pip install tensorflow tf-keras"
-        )
-
     from promoterai_torch.architecture import PromoterAI
+    from promoterai_torch.savedmodel import read_savedmodel_variables
 
-    print(f"Loading Keras model from {keras_model_path} ...")
-    keras_model = tf_keras.models.load_model(keras_model_path)
-
-    # Flat weight dict: strip trailing ':0' from TF variable names
-    w = {v.name.rstrip(":0"): v.numpy() for v in keras_model.weights}
+    print(f"Loading Keras SavedModel weights from {keras_model_path} ...")
+    # Read straight from the SavedModel files (numpy only, no TensorFlow).
+    w = read_savedmodel_variables(keras_model_path)
 
     # ── Infer architecture ────────────────────────────────────────────────────
     if "dense/kernel" not in w:

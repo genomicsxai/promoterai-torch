@@ -26,7 +26,7 @@ def load_tf_model(path: str):
     except ImportError as exc:
         raise ImportError(
             "tf-keras is required for TF/Torch track parity examples. "
-            'Install with: pip install "promoterai-torch[convert]"'
+            'Install with: uv sync --group tf (or pip install tensorflow tf-keras)'
         ) from exc
 
     return tf_keras.models.load_model(path)

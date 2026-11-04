@@ -46,6 +46,7 @@ jobs where both runtimes can coexist in GPU memory.
 | `src/promoterai_torch/score.py`                 | Variant effect scoring                                                                |
 | `src/promoterai_torch/cli.py`                   | Unified `promoterai-torch` entry point                                                |
 | `src/promoterai_torch/utils.py`                 | LR/WD scheduler, checkpoint, TF weight converter                                      |
+| `src/promoterai_torch/savedmodel.py`            | TensorFlow-free Keras SavedModel variable reader used by the converter                |
 | `examples/compare_tf_torch_tracks_random.py`    | Full-track TF/Torch parity on deterministic random one-hot sequences                  |
 | `examples/compare_tf_torch_tracks_promoters.py` | Full-track TF/Torch parity on chosen genomic promoters                                |
 | `examples/track_parity_utils.py`                | Shared parity helpers; handles multi-species TF dict outputs and VRAM cleanup helpers |
@@ -54,7 +55,9 @@ jobs where both runtimes can coexist in GPU memory.
 
 Core install (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tqdm`. No TensorFlow dependency for inference.
 
-`[convert]` extra adds: `tensorflow`, `tf-keras`. Required for `promoterai-torch convert`; downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints). Don't add a platform-conditional `tensorflow-cpu` variant here — `tf-keras` itself unconditionally requires plain `tensorflow`, so installing `tensorflow-cpu` alongside it pulls in both packages, which install conflicting builds of the same files (e.g. `tensorflow/libtensorflow_cc.so.2`) into the same site-packages path, producing an ABI-mismatched "undefined symbol" import error on Linux.
+`promoterai-torch convert` needs only the core install: `savedmodel.py` reads a Keras SavedModel's variables straight from `saved_model.pb` + the `variables/` tensor bundle with numpy (verified bitwise-identical to `tf_keras.models.load_model(...).weights`, same order, on all four Illumina models). Downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints). There is no `[convert]` extra any more.
+
+The `tf` dependency group (`tensorflow`, `tf-keras`, gated to Python < 3.14 because TF has no 3.14 wheels) is only for the cross-framework equivalence tests and track-parity examples. Don't add a platform-conditional `tensorflow-cpu` variant there — `tf-keras` itself unconditionally requires plain `tensorflow`, so installing `tensorflow-cpu` alongside it pulls in both packages, which install conflicting builds of the same files (e.g. `tensorflow/libtensorflow_cc.so.2`) into the same site-packages path, producing an ABI-mismatched "undefined symbol" import error on Linux.
 
 `[train]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `figwig` (preprocessing; pure-Python + numba, batched multithreaded BigWig reads). Required for `preprocess`, `train`, and `SequenceDataset`.
 
@@ -109,12 +112,14 @@ Full predicted regulatory tracks are validated by `examples/compare_tf_torch_tra
 
 Beyond score/track parity (eval mode), **training-step gradient equivalence** was verified on real published checkpoints (GPU) via `tests/test_tf_gradient_equivalence_real.py` and `tests/test_tf_gradient_equivalence_finetune_real.py`, covering all four variants: `hg38` and `hg38_mm10` (base, from-scratch/`train.py` scenario) and `hg38_finetune`/`hg38_mm10_finetune` (fine-tuned/`TwinModel` scenario). All four pass; the base models' forward-pass prediction agreement is cosine=1.0000 with relative L2 under 0.5% (single- and multi-species, both heads). See PR #11 for the full run logs and notes/implementation.md for the diagnostic journey (species ordering, TF32/oneDNN precision, and the frozen-BatchNorm-in-fine-tuning distinction that required the separate finetune test).
 
+The TF-free SavedModel reader (`savedmodel.py`) is covered without TensorFlow by `tests/test_savedmodel.py` against a committed toy SavedModel (`tests/data/toy_savedmodel`, regenerate with `tests/data/make_toy_savedmodel.py`). After touching it, also check it against `tf_keras` on each real Illumina model (needs the `tf` group): `uv run pytest tests/test_savedmodel.py -k real --keras-savedmodel-path /path/to/model` — see "Reading SavedModels without TensorFlow" in `notes/implementation.md`.
+
 When changing parity examples, add or update tests in `tests/test_track_parity_examples.py`. These tests avoid the licensed SavedModels but cover dict-output normalization, per-head error calculation, random sequence generation, promoter sequence extraction, and CLI help smoke checks.
 
-`tests/test_tf_gradient_equivalence.py` runs one real cross-framework training step (Keras and PyTorch, identical converted weights and batch, toy 8-block/dim-16 scale) and compares loss, raw/post-clip gradients, AdamW parameter deltas, and BatchNorm running stats — it does not need the licensed SavedModels. Along with `tests/test_convert.py`, it requires the `convert` extra (`tensorflow`/`tf-keras`) and is skipped by default, including in per-PR CI. Run both locally before merging any change to `architecture.py`, `train.py`, `finetune.py`, or the weight converter in `utils.py`:
+`tests/test_tf_gradient_equivalence.py` runs one real cross-framework training step (Keras and PyTorch, identical converted weights and batch, toy 8-block/dim-16 scale) and compares loss, raw/post-clip gradients, AdamW parameter deltas, and BatchNorm running stats — it does not need the licensed SavedModels. Along with `tests/test_convert.py`, it requires the `tf` dependency group (`tensorflow`/`tf-keras`) and is skipped by default, including in per-PR CI. Run both locally before merging any change to `architecture.py`, `train.py`, `finetune.py`, or the weight converter in `utils.py`:
 
 ```sh
-uv sync --group dev --extra convert
+uv sync --group dev --group tf
 uv run pytest tests/test_convert.py tests/test_tf_gradient_equivalence.py -v
 ```
 

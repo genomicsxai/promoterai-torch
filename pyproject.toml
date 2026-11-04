@@ -50,12 +50,6 @@ Repository = "https://github.com/genomicsxai/promoterai-torch"
 Issues = "https://github.com/genomicsxai/promoterai-torch/issues"
 
 [project.optional-dependencies]
-# TensorFlow ships no Python 3.14 wheels yet; the TF converter and equivalence
-# tests are unavailable there (they skip when tf-keras is missing).
-convert = [
-    "tensorflow; python_version < '3.14'",
-    "tf-keras; python_version < '3.14'",
-]
 train = ["h5py>=3.0", "figwig>=0.2.0"]
 interpret = ["tangermeme>=1.6"]
 wandb = ["wandb>=0.16"]
@@ -66,6 +60,13 @@ test = [
     "h5py>=3.0",
     "figwig>=0.2.0",
     "tangermeme>=1.6",
+]
+# TensorFlow/tf-keras are only needed by the cross-framework equivalence tests
+# (conversion itself reads SavedModels with numpy). No TF wheels exist for
+# Python 3.14 yet, so those tests skip there.
+tf = [
+    "tensorflow; python_version < '3.14'",
+    "tf-keras; python_version < '3.14'",
 ]
 publish = ["build>=1.2", "twine>=5.0"]
 dev = [{ include-group = "test" }, { include-group = "publish" }]

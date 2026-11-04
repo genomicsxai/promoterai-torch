@@ -33,7 +33,7 @@ Requires:
 Skipped automatically unless --keras-savedmodel-path is given (including in CI,
 where the licensed model is never available).
 
-    uv sync --group dev --extra convert
+    uv sync --group dev --group tf
     uv run pytest tests/test_tf_gradient_equivalence_finetune_real.py -v -s \\
         --keras-savedmodel-path /path/to/promoterai_keras_finetune_model \\
         --device cuda --gradient-batch-size 2

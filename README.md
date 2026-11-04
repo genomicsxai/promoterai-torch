@@ -26,12 +26,12 @@ Or with [uv](https://docs.astral.sh/uv/):
 uv add promoterai-torch
 ```
 
-Optional workflows are split into extras so inference installs do not pull in
-TensorFlow, HDF5/BigWig tooling, or attribution libraries:
+The core package also converts the official Keras SavedModels (no TensorFlow
+needed). Optional workflows are split into extras so inference installs do not
+pull in HDF5/BigWig tooling or attribution libraries:
 
 | Extra       | Enables                                              |
 | ----------- | ----------------------------------------------------- |
-| `convert`   | Convert Keras/TensorFlow SavedModels to PyTorch checkpoints |
 | `train`     | Preprocess data, train from scratch, or fine-tune      |
 | `wandb`     | Weights & Biases logging (combine with `train`)        |
 | `interpret` | Run DeepLIFT/SHAP interpretation with tangermeme       |
@@ -42,13 +42,7 @@ cloned checkout with development dependencies, see
 
 ## Convert a pretrained Keras model
 
-First install the `[convert]` extra (see above), then download the pretrained PromoterAI SavedModel from [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI) and convert it to a PyTorch checkpoint:
-
-```sh
-pip install "promoterai-torch[convert]"
-# or 
-uv add promoterai-torch --extra convert
-```
+Download the pretrained PromoterAI SavedModel from [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI) and convert it to a PyTorch checkpoint. Conversion reads the SavedModel files directly with numpy, so it works with the core install and does not need TensorFlow:
 
 ```sh
 promoterai-torch convert \
@@ -58,7 +52,7 @@ promoterai-torch convert \
     --output_length 4096
 ```
 
-Architecture parameters (`num_blocks`, `model_dim`, `output_dims`) are inferred automatically from the Keras model. `--input_length` and `--output_length` are optional metadata.
+Architecture parameters (`num_blocks`, `model_dim`, `output_dims`) are inferred automatically from the Keras model. (The `[convert]` extra that earlier versions used for this is gone; `pip install "promoterai-torch[convert]"` still installs the package, with a warning that the extra doesn't exist.) `--input_length` and `--output_length` are optional metadata.
 
 ## Usage
 

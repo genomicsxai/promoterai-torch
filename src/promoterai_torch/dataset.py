@@ -38,6 +38,50 @@ def _truncated_normal(stddev: float) -> float:
 _logger = logging.getLogger(__name__)
 
 
+def _sample_window(
+    stored_input_length: int,
+    stored_output_length: int,
+    input_length: int,
+    output_length: int,
+    augment: bool,
+) -> tuple:
+    """Draw a sample's crop: (x_start, y_start, reverse_complement).
+
+    Randomly re-centers the model's window within the over-length stored x/y
+    (a truncated-normal shift, shared by x and y) and, when augmenting, picks a
+    reverse-complement strand flip with probability 0.25. Drawing the crop before
+    reading lets SequenceDataset read only the cropped rows from HDF5.
+    """
+    input_margin = stored_input_length - input_length
+    output_margin = stored_output_length - output_length
+    shift_span = min(input_margin, output_margin)
+    max_shift = shift_span // 2
+
+    shift = round(_truncated_normal(shift_span // 4 * int(augment)))
+    shift = min(max(shift, -max_shift), max_shift)
+
+    reverse_complement = bool(augment) and np.random.uniform() < 0.25
+    return input_margin // 2 + shift, output_margin // 2 + shift, reverse_complement
+
+
+def _finish_sample(
+    x_crop: np.ndarray, y_crop: np.ndarray, reverse_complement: bool, sample_weight: tuple
+) -> tuple:
+    """Apply the strand flip to already-cropped x/y and build per-species targets/weights.
+
+    Returns (x_crop, y_tuple, weight_tuple).
+    """
+    strand = -1 if reverse_complement else 1
+    x_crop = np.ascontiguousarray(x_crop[::strand, ::strand])
+    y_crop = np.ascontiguousarray(y_crop[::strand])
+
+    y_tuple = tuple(
+        y_crop if sw else np.array([[0.0]], dtype="float32") for sw in sample_weight
+    )
+    weight_tuple = tuple(float(sw) * float(x_crop.max()) for sw in sample_weight)
+    return x_crop, y_tuple, weight_tuple
+
+
 def _prepare_sample(
     x: np.ndarray,
     y: np.ndarray,
@@ -48,30 +92,19 @@ def _prepare_sample(
 ) -> tuple:
     """Randomly re-center the over-length stored x/y around the model's window,
     optionally reverse-complementing both. Returns (x_crop, y_tuple, weight_tuple).
+
+    Equivalent to `_sample_window` + cropping + `_finish_sample`, which
+    SequenceDataset calls directly so it only reads the cropped rows.
     """
-    input_margin = x.shape[0] - input_length
-    output_margin = y.shape[0] - output_length
-    shift_span = min(input_margin, output_margin)
-    max_shift = shift_span // 2
-
-    shift = round(_truncated_normal(shift_span // 4 * int(augment)))
-    shift = min(max(shift, -max_shift), max_shift)
-
-    reverse_complement = bool(augment) and np.random.uniform() < 0.25
-    strand = -1 if reverse_complement else 1
-
-    x_start = input_margin // 2 + shift
-    y_start = output_margin // 2 + shift
-    x_crop = np.ascontiguousarray(
-        x[x_start : x_start + input_length][::strand, ::strand]
+    x_start, y_start, reverse_complement = _sample_window(
+        x.shape[0], y.shape[0], input_length, output_length, augment
     )
-    y_crop = np.ascontiguousarray(y[y_start : y_start + output_length][::strand])
-
-    y_tuple = tuple(
-        y_crop if sw else np.array([[0.0]], dtype="float32") for sw in sample_weight
+    return _finish_sample(
+        x[x_start : x_start + input_length],
+        y[y_start : y_start + output_length],
+        reverse_complement,
+        sample_weight,
     )
-    weight_tuple = tuple(float(sw) * float(x_crop.max()) for sw in sample_weight)
-    return x_crop, y_tuple, weight_tuple
 
 
 class SequenceDataset(Dataset):
@@ -140,15 +173,17 @@ class SequenceDataset(Dataset):
         """Return (x_tensor, y_tuple, weight_tensor) after cropping and optional augmentation."""
         fi, ri = self._index[idx]
         handle = self._get_handle(fi)
-        x = handle["x"][ri]  # (L_stored, 4)
-        y = handle["y"][ri]  # (L_stored, n_tracks)
-        x_crop, y_tuple, w_tuple = _prepare_sample(
-            x,
-            y,
-            self.input_length,
-            self.output_length,
-            self.sample_weight,
-            self.augment,
+        x_ds, y_ds = handle["x"], handle["y"]
+        x_start, y_start, reverse_complement = _sample_window(
+            x_ds.shape[1], y_ds.shape[1], self.input_length, self.output_length, self.augment
+        )
+        # Read only the cropped rows: with length-chunked files (preprocess.py)
+        # HDF5 then decompresses just the chunks the window overlaps, not the
+        # whole over-length stored sample (y is ~4x longer than the crop).
+        x = x_ds[ri, x_start : x_start + self.input_length]
+        y = y_ds[ri, y_start : y_start + self.output_length]
+        x_crop, y_tuple, w_tuple = _finish_sample(
+            x, y, reverse_complement, self.sample_weight
         )
         x_t = torch.from_numpy(x_crop)
         y_t = tuple(torch.from_numpy(np.array(yt, dtype="float32")) for yt in y_tuple)

@@ -308,3 +308,34 @@ def test_multi_species_batches_are_species_homogeneous(tmp_path):
         # exactly one species active per row, and the same one for every row
         assert active_species.sum(dim=1).eq(1).all()
         assert (active_species == active_species[0]).all()
+
+
+@pytest.mark.parametrize("augment", [False, True])
+def test_windowed_hdf5_reads_match_full_row_prepare_sample(tmp_path, augment):
+    """SequenceDataset reads only the crop window from HDF5; under the same RNG
+    state it must return exactly what cropping the full stored row would."""
+    import random
+
+    h5py = _require_h5py()
+    rng = np.random.default_rng(0)
+    n, Lx, Ly, T = 6, 300, 160, 3
+    x = np.eye(4, dtype="float32")[rng.integers(0, 4, (n, Lx))]
+    y = rng.random((n, Ly, T)).astype("float32")
+    h5_path = tmp_path / "chr.h5"
+    with h5py.File(h5_path, "w") as f:
+        # Length-chunked like preprocess writes, with a partial last chunk.
+        f.create_dataset("x", data=x, chunks=(1, 64, 4), compression="gzip")
+        f.create_dataset("y", data=y, chunks=(1, 48, T), compression="gzip")
+
+    ds = SequenceDataset([str(h5_path)], 200, 60, (True,), augment=augment)
+    for idx in range(n):
+        for seed in range(5):
+            random.seed(seed)
+            np.random.seed(seed)
+            x_t, y_t, w_t = ds[idx]
+            random.seed(seed)
+            np.random.seed(seed)
+            x_ref, y_ref, w_ref = _prepare_sample(x[idx], y[idx], 200, 60, (True,), augment)
+            np.testing.assert_array_equal(x_t.numpy(), x_ref)
+            np.testing.assert_array_equal(y_t[0].numpy(), y_ref[0])
+            np.testing.assert_array_equal(w_t.numpy(), np.array(w_ref, dtype="float32"))

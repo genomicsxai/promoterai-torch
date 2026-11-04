@@ -52,6 +52,17 @@ except ImportError as exc:
 
 _GZIP_LEVEL = 4
 
+# Target uncompressed bytes per HDF5 chunk. Each sample is split along its length
+# into chunks of about this size, so a training read of a cropped window only
+# decompresses the chunks it overlaps.
+_CHUNK_BYTES = 1 << 20
+
+
+def _chunk_length(length: int, n_features: int) -> int:
+    """Positions per HDF5 chunk: a power of two near _CHUNK_BYTES of float32, <= length."""
+    positions = max(1, _CHUNK_BYTES // (4 * n_features))
+    return min(length, 1 << (positions.bit_length() - 1))
+
 
 def _available_cpus() -> int:
     """CPUs this process may actually use, not the node's total core count.
@@ -111,18 +122,22 @@ def _compile_xform(expr: str):
 def _create_growable_dataset(f: h5py.File, name: str, sample_shape: tuple) -> h5py.Dataset:
     """Create a resizable, gzip-compressed dataset that starts empty and grows by row.
 
-    Each HDF5 chunk is one sample. Training reads one random row at a time, and
-    HDF5 decompresses a whole chunk to read any part of it, so multi-row chunks
-    make every read decompress (and discard) many other samples -- 67x slower
-    per read at 64 rows per chunk. Multi-row chunks can also exceed HDF5's 4 GB
-    chunk limit at real scale (256 x 16384 bp x 498 tracks of float32 is 7.8 GiB).
+    Each HDF5 chunk is part of one sample: one row, and about _CHUNK_BYTES along
+    the length. HDF5 decompresses a whole chunk to read any part of it, and
+    training reads one random row at a time and keeps only a window of it (y is
+    stored ~4x longer than the model's output, for shift augmentation). Multi-row
+    chunks made every read decompress many other samples (67x slower per read at
+    64 rows per chunk) and can exceed HDF5's 4 GB chunk limit at real scale;
+    whole-row chunks made every read decompress the full stored length (~2.7x
+    slower for a 4096-bp window of a 16384-bp row than ~1-2 kb chunks).
     """
+    length, n_features = sample_shape
     return f.create_dataset(
         name,
         shape=(0, *sample_shape),
         maxshape=(None, *sample_shape),
         dtype="float32",
-        chunks=(1, *sample_shape),
+        chunks=(1, _chunk_length(length, n_features), n_features),
         compression="gzip",
         compression_opts=_GZIP_LEVEL,
     )
@@ -133,10 +148,12 @@ def _append_rows(
 ) -> None:
     """Grow dataset by len(rows) and write them into the newly added rows.
 
-    With a pool, each row (= one HDF5 chunk) is deflated on the pool's threads
+    With a pool, each chunk (part of one row) is deflated on the pool's threads
     with zlib at the dataset's gzip level and stored as-is via
     write_direct_chunk. That gives the same chunk bytes h5py's gzip filter
-    would write itself, single-threaded.
+    would write itself, single-threaded. A row's last chunk, when the length is
+    not a multiple of the chunk length, is zero-padded to the full chunk size,
+    as HDF5 stores edge chunks (0 is the dataset's fill value).
     """
     start = dataset.shape[0]
     dataset.resize(start + len(rows), axis=0)
@@ -144,10 +161,18 @@ def _append_rows(
         dataset[start:] = rows
         return
     rows = np.ascontiguousarray(rows, dtype=dataset.dtype)
-    zeros = (0,) * (rows.ndim - 1)
-    compressed = pool.map(lambda row: zlib.compress(memoryview(row), _GZIP_LEVEL), rows)
-    for i, blob in enumerate(compressed):
-        dataset.id.write_direct_chunk((start + i, *zeros), blob)
+    _, chunk_len, n_features = dataset.chunks
+    length = rows.shape[1]
+
+    def piece(i, k):
+        part = rows[i, k : k + chunk_len]
+        if len(part) < chunk_len:
+            part = np.concatenate([part, np.zeros((chunk_len - len(part), n_features), part.dtype)])
+        return zlib.compress(memoryview(np.ascontiguousarray(part)), _GZIP_LEVEL)
+
+    offsets = [(i, k) for i in range(len(rows)) for k in range(0, length, chunk_len)]
+    for (i, k), blob in zip(offsets, pool.map(lambda ik: piece(*ik), offsets)):
+        dataset.id.write_direct_chunk((start + i, k, 0), blob)
 
 
 def preprocess_chrom(

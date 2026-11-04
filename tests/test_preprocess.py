@@ -177,9 +177,13 @@ def test_preprocess_reports_missing_figwig(tmp_path, monkeypatch):
         )
 
 
-def test_threaded_compression_writes_same_chunks_as_h5py_gzip_filter(tmp_path):
+def test_threaded_compression_writes_same_chunks_as_h5py_gzip_filter(tmp_path, monkeypatch):
     """--threads only changes speed: the pooled zlib + write_direct_chunk path
-    must store the exact chunk bytes that h5py's own gzip filter writes."""
+    must store the exact chunk bytes that h5py's own gzip filter writes,
+    including zero-padded partial edge chunks along the length."""
+    # Tiny chunks so each row spans several, with a partial last one: y is
+    # 36 positions x 2 tracks in 8-position chunks; x is 64 x 4 in 4s.
+    monkeypatch.setattr(preprocess, "_CHUNK_BYTES", 96)
     rng = np.random.default_rng(0)
     L = 400
     fasta_path = tmp_path / "g.fa"
@@ -206,7 +210,7 @@ def test_threaded_compression_writes_same_chunks_as_h5py_gzip_filter(tmp_path):
             chrom="chr1",
             hdf5_folder=str(out),
             input_length=64,
-            output_length=32,
+            output_length=36,
             chunk_size=5,
             threads=threads,
         )
@@ -217,10 +221,11 @@ def test_threaded_compression_writes_same_chunks_as_h5py_gzip_filter(tmp_path):
             a, b = serial[name], threaded[name]
             assert a.shape == b.shape and a.shape[0] == 23
             assert (a.compression, a.compression_opts) == (b.compression, b.compression_opts)
+            assert a.chunks == b.chunks == {"x": (1, 4, 4), "y": (1, 8, 2)}[name]
             np.testing.assert_array_equal(a[:], b[:])
-            zeros = (0,) * (a.ndim - 1)
             for i in range(a.shape[0]):
-                assert a.id.read_direct_chunk((i, *zeros)) == b.id.read_direct_chunk((i, *zeros))
+                for k in range(0, a.shape[1], a.chunks[1]):
+                    assert a.id.read_direct_chunk((i, k, 0)) == b.id.read_direct_chunk((i, k, 0))
 
 
 def test_available_cpus_prefers_slurm_allocation(monkeypatch):
@@ -228,3 +233,16 @@ def test_available_cpus_prefers_slurm_allocation(monkeypatch):
     assert preprocess._available_cpus() == 3
     monkeypatch.delenv("SLURM_CPUS_PER_TASK")
     assert 1 <= preprocess._available_cpus() <= (os.cpu_count() or 1)
+
+
+@pytest.mark.parametrize(
+    "length, n_features, expected",
+    [
+        (16384, 498, 512),  # published hg38 tracks: ~1 MiB chunks
+        (16384, 32, 8192),
+        (32768, 4, 32768),  # one-hot x: whole row fits in one chunk
+        (4, 1, 4),
+    ],
+)
+def test_chunk_length_targets_about_one_mib(length, n_features, expected):
+    assert preprocess._chunk_length(length, n_features) == expected

@@ -337,7 +337,7 @@ identical to the earlier TF-based conversions.
 
 After the figwig switch, h5py's gzip filter (single-threaded, ~40 MiB/s raw) was
 ~70% of a preprocess job and the per-sample xform/flip/transpose most of the rest,
-so extra figwig threads barely helped. Since each sample is its own HDF5 chunk,
+so extra figwig threads barely helped. Since every HDF5 chunk lies within one sample,
 `_append_rows` deflates every row with `zlib.compress` (which releases the GIL)
 on a `ThreadPoolExecutor` and stores it with `dataset.id.write_direct_chunk`;
 `_finish_sample` (NaN fill, xform, flip, transpose) runs per sample on the same
@@ -349,6 +349,20 @@ to `SLURM_CPUS_PER_TASK`, else `len(os.sched_getaffinity(0))` -- never
 `os.cpu_count()`, which reports the whole node and oversubscribes a restricted
 job. Threads share one ~2 GiB y buffer where processes each hold their own, so
 for many cores prefer fewer chromosomes in flight with more threads each.
+
+## Training reads only the crop window; HDF5 chunks split along the length (`dataset.py`, `preprocess.py`)
+
+`SequenceDataset` used to read a whole stored row (`handle["y"][ri]`) and let
+`_prepare_sample` crop it. The stored y is 16384 bp for a 4096-bp model output
+(the margin is for shift augmentation), and HDF5 decompresses a chunk whole to
+read any part of it, so with whole-sample chunks every read decompressed ~4x the
+data it kept. Now `_sample_window` draws the shift/strand first (same RNG calls in
+the same order, so a seed gives the same crops; `test_windowed_hdf5_reads_match_full_row_prepare_sample`),
+the dataset reads just `[ri, start:start + length]`, and preprocessing chunks each
+sample along the length at ~1 MiB (`_chunk_length`: 512 positions at 498 tracks;
+one-hot x stays one chunk). With the 498-track chunk geometry, reads went from 6.4
+to 3.4 ms per sample. Threaded `write_direct_chunk` writes zero-pad a row's partial
+last chunk, which matches what h5py's filter stores byte for byte.
 
 ## Incremental (fastISM-style) substitution scoring (`src/promoterai_torch/incremental.py`)
 

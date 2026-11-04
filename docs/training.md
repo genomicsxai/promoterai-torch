@@ -35,6 +35,19 @@ promoterai-torch preprocess \
     --chrom chr1 --input_length 32768 --output_length 16384
 ```
 
+Each run multithreads BigWig reads, per-sample processing (NaN fill, transforms,
+strand flips) and gzip compression. `--threads` defaults to the CPUs the process
+is allowed to use (`SLURM_CPUS_PER_TASK`, else its CPU affinity), not every core
+on the node. To preprocess several chromosomes at once, run one process per
+chromosome and split the cores between them, keeping processes × `--threads` at
+about the core count.
+
+Each sample is stored as its own HDF5 chunk, so training's random single-sample
+reads only decompress that sample; `--chunk_size` (default 64) only sets how many
+samples are buffered and written at a time. Files written by earlier versions
+(several samples per chunk) still load, but read much more slowly: re-run
+preprocessing to get the new layout.
+
 Once done, you can then train on this dataset.
 
 Check the generated per-chromosome HDF5 files before launching a long run:

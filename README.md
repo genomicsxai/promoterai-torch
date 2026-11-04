@@ -11,7 +11,7 @@ A PyTorch port of [PromoterAI](https://github.com/Illumina/PromoterAI) v1 from I
 
 ## Install
 
-Python 3.10, 3.11, 3.12, and 3.13 are supported.
+Python 3.10, 3.11, 3.12, 3.13, and 3.14 are supported.
 
 For variant scoring, embedding extraction, and ordinary PyTorch inference from
 an already-converted checkpoint, install the core package:

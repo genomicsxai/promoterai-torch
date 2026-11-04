@@ -30,28 +30,41 @@ from promoterai_torch.onehot import onehot_encode
 if TYPE_CHECKING:
     import h5py
 
-_pybigtools_import_error = None
+_figwig_import_error = None
 try:
-    import pybigtools
+    import figwig
 except ImportError as exc:
-    pybigtools = None
-    _pybigtools_import_error = exc
+    figwig = None
+    _figwig_import_error = exc
+
+# Threads figwig uses to decompress BigWig blocks for each batched read.
+_BIGWIG_THREADS = min(8, os.cpu_count() or 1)
 
 
-def _extract_bigwig(bw, chrom, start, end):
-    """Fetch values from a BigWig handle; returns zeros on any error or missing region."""
-    try:
-        vals = bw.values(chrom, max(0, start), end, missing=0.0, oob=0.0)
-        if vals is None:
-            return np.zeros(end - start, dtype="float32")
-        vals = np.array(vals, dtype="float32")
-        return vals
-    except Exception:  # noqa: BLE001 - any pybigtools read failure should fall back to zeros
-        return np.zeros(end - start, dtype="float32")
+def _read_tracks(readers, chrom, starts, width):
+    """Read one window per start from every reader, as (n, len(readers), width).
+
+    Bases past the chromosome end (NaN in figwig), uncovered bases, and a chrom
+    absent from a file are all 0, matching pybigtools'
+    `values(..., missing=0.0, oob=0.0)`. Every start must be >= 0.
+    """
+    starts = np.asarray(starts, dtype=np.int64)
+    out = np.zeros((len(starts), len(readers), width), dtype="float32")
+    if len(starts):
+        figwig.read_bigwig(
+            list(readers), chrom, starts, width, out=out, n_jobs=_BIGWIG_THREADS
+        )
+        np.nan_to_num(out, copy=False, nan=0.0)
+    return out
 
 
 def _compile_xform(expr: str):
-    """Compile a per-track BigWig value transform expression (e.g. "np.arcsinh") from the bigwig TSV."""
+    """Compile a per-track BigWig value transform expression (e.g. "np.arcsinh") from the bigwig TSV.
+
+    The transform is applied to a whole (n_windows, output_length) block of one
+    track at a time, so it must be elementwise (any numpy ufunc or arithmetic
+    lambda is).
+    """
     return eval(expr, {"np": np, "__builtins__": {}})
 
 
@@ -106,13 +119,13 @@ def preprocess_chrom(
         )
 
     fasta = pyfaidx.Fasta(fasta_file)
-    if pybigtools is None:
+    if figwig is None:
         raise ImportError(
-            "pybigtools is required for preprocessing. "
+            "figwig is required for preprocessing. "
             'Install with: pip install "promoterai-torch[train]"'
-        ) from _pybigtools_import_error
-    bws_fwd = [pybigtools.open(p) for p in df_bw["fwd"]]
-    bws_rev = [pybigtools.open(p) for p in df_bw["rev"]]
+        ) from _figwig_import_error
+    bws_fwd = [figwig.BigWigReader(p) for p in df_bw["fwd"]]
+    bws_rev = [figwig.BigWigReader(p) for p in df_bw["rev"]]
     bw_xforms = [_compile_xform(expr) for expr in df_bw["xform"]]
 
     half_in = input_length // 2
@@ -123,72 +136,82 @@ def preprocess_chrom(
     hdf5_path = os.path.join(hdf5_folder, f"{chrom}.h5")
     h5_file: h5py.File | None = None
     x_ds = y_ds = None
-    xs_buf, ys_buf = [], []
+    # One entry per buffered sample: its one-hot x (None for a boundary
+    # zero row), BigWig window start, and strand.
+    buf: list[tuple[np.ndarray | None, int, bool]] = []
     total_rows = 0
+
+    def build_y() -> np.ndarray:
+        """Batch-read the buffered samples' tracks; (n, output_length, n_tracks)."""
+        ys = np.zeros((len(buf), n_tracks, output_length), dtype="float32")
+        for minus, readers in ((False, bws_fwd), (True, bws_rev)):
+            idx = [i for i, (x, _, m) in enumerate(buf) if x is not None and m == minus]
+            if idx:
+                ys[idx] = _read_tracks(
+                    readers, chrom, [buf[i][1] for i in idx], output_length
+                )
+        for j, xform in enumerate(bw_xforms):
+            ys[:, j] = xform(ys[:, j])
+        ys = ys.transpose(0, 2, 1)  # (n, output_length, n_tracks)
+        for i, (x, _, minus) in enumerate(buf):
+            if x is None:
+                ys[i] = 0.0  # boundary rows stay all-zero even if xform(0) != 0
+            elif minus:
+                ys[i] = ys[i, ::-1]
+        return np.ascontiguousarray(ys)
 
     def flush(force=False):
         """Append buffered samples to the chromosome's HDF5 file, creating it on first flush."""
-        nonlocal xs_buf, ys_buf, h5_file, x_ds, y_ds, total_rows
-        if not xs_buf or (not force and len(xs_buf) < chunk_size):
+        nonlocal buf, h5_file, x_ds, y_ds, total_rows
+        if not buf or (not force and len(buf) < chunk_size):
             return
-        xs = np.stack(xs_buf).astype("float32")
-        ys = np.stack(ys_buf).astype("float32")
+        ys = build_y()
+        xs = np.stack(
+            [
+                np.zeros((input_length, 4), dtype="float32") if x is None else x
+                for x, _, _ in buf
+            ]
+        ).astype("float32")
         if h5_file is None:
             h5_file = h5py.File(hdf5_path, "w")
             x_ds = _create_growable_dataset(h5_file, "x", xs.shape[1:], chunk_size)
             y_ds = _create_growable_dataset(h5_file, "y", ys.shape[1:], chunk_size)
         _append_rows(x_ds, xs)
         _append_rows(y_ds, ys)
-        total_rows += len(xs_buf)
-        print(f"Wrote {len(xs_buf)} samples ({total_rows} total) to {hdf5_path}")
-        xs_buf, ys_buf = [], []
+        total_rows += len(buf)
+        print(f"Wrote {len(buf)} samples ({total_rows} total) to {hdf5_path}")
+        buf = []
 
     for _, row in df_tss.iterrows():
         pos = int(row["pos"]) - 1  # 0-based
         strand = row.get("strand", 1)
+        is_minus = strand in (-1, "-1", "-")
+        bw_start = pos - half_out
 
-        seq_str = str(fasta[chrom][pos - half_in : pos + half_in]).upper()
-        if len(seq_str) < input_length:
+        seq_str = (
+            str(fasta[chrom][pos - half_in : pos + half_in]).upper()
+            if pos - half_in >= 0
+            else ""
+        )
+        if len(seq_str) < input_length or bw_start < 0:
             # Too close to a chromosome edge for a full window. Illumina's
             # generator.py keeps this TSS as an all-zero row (rather than
             # dropping it) so it stays in the dataset and gets zero-weighted
             # downstream via _prepare_sample's x.max()==0 check; mirror that
             # instead of shrinking the dataset and skewing per-species sizes.
-            xs_buf.append(np.zeros((input_length, 4), dtype="float32"))
-            ys_buf.append(np.zeros((output_length, n_tracks), dtype="float32"))
-            if len(xs_buf) >= chunk_size:
-                flush()
-            continue
-        x = onehot_encode(seq_str)
+            buf.append((None, 0, is_minus))
+        else:
+            x = onehot_encode(seq_str)
+            if is_minus:
+                x = x[::-1, ::-1].copy()
+            buf.append((x, bw_start, is_minus))
 
-        is_minus = strand in (-1, "-1", "-")
-        tracks = []
-        for j, (bw_fwd, bw_rev, xform) in enumerate(zip(bws_fwd, bws_rev, bw_xforms)):
-            bw = bw_rev if is_minus else bw_fwd
-            vals = _extract_bigwig(bw, chrom, pos - half_out, pos + half_out)
-            if len(vals) < output_length:
-                vals = np.pad(vals, (0, output_length - len(vals)))
-            vals = xform(vals[:output_length])
-            vals = np.asarray(vals, dtype="float32")
-            tracks.append(vals)
-        y = np.stack(tracks, axis=-1)  # (output_length, n_tracks)
-
-        if is_minus:
-            x = x[::-1, ::-1].copy()
-            y = y[::-1, :].copy()
-
-        xs_buf.append(x)
-        ys_buf.append(y)
-
-        if len(xs_buf) >= chunk_size:
+        if len(buf) >= chunk_size:
             flush()
 
     flush(force=True)
     if h5_file is not None:
         h5_file.close()
-
-    for bw in bws_fwd + bws_rev:
-        bw.close()
 
     if total_rows:
         print(f"Preprocessing complete for {chrom}: {total_rows} samples written to {hdf5_path}.")

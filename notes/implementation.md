@@ -38,9 +38,9 @@ class PromoterAIWrapper(nn.Module):
 ## Dependency layout
 
 - Core (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tqdm` — no TensorFlow
-- `[convert]`: `tensorflow`, `tf-keras` — don't add a platform-conditional `tensorflow-cpu` here; `tf-keras` already requires plain `tensorflow` unconditionally, and installing both corrupts site-packages (see AGENTS.md's Dependencies section)
-- `[train]`: `h5py`, `scipy`, `pyBigWig`
-- `[dev]`: `pytest`, `h5py`, `scipy`, `tangermeme>=0.5`
+- No `[convert]` extra: conversion reads SavedModels with numpy (`savedmodel.py`). The `tf` dependency group (`tensorflow`, `tf-keras`, Python < 3.14) is only for cross-framework tests — don't add a platform-conditional `tensorflow-cpu` here; `tf-keras` already requires plain `tensorflow` unconditionally, and installing both corrupts site-packages (see AGENTS.md's Dependencies section)
+- `[train]`: `h5py`, `figwig`
+- `test`/`dev` groups: `pytest`, `h5py`, `figwig`, `tangermeme>=1.6`
 
 Downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints).
 
@@ -305,6 +305,50 @@ computes) instead of going through cosine/rel_l2 at all. Use this whenever
 asserting a buffer was untouched (e.g. a frozen BatchNorm running stat); keep
 `assert_pass_rate` for comparing two frameworks' genuinely-independent
 computations.
+
+## Reading SavedModels without TensorFlow: take the root's `variables` list, not every variable node (`src/promoterai_torch/savedmodel.py`)
+
+`convert_tf_weights` used to `tf_keras.models.load_model()` the SavedModel just to
+read `keras_model.weights`, which made TensorFlow a hard dependency of conversion
+(and blocked Python 3.14, which has no TF/tf-keras wheels). The weights are fully
+recoverable from the files: `saved_model.pb`'s `SavedObjectGraph` names each
+variable node (`SavedVariable.name`), and the tensor bundle's
+`_CHECKPOINTABLE_OBJECT_GRAPH` (same node ids) gives each node's checkpoint key into
+`variables.index`/`variables.data-*`.
+
+The gotcha: the published Illumina SavedModels are *compiled* models, so the object
+graph also holds the AdamW optimizer's slot variables (`AdamW/m/...`, `AdamW/v/...`,
+~530 of the 900 variable nodes) and compiled metrics' accumulators (`total`,
+`count` under `keras_api/metrics/N`). Taking every variable node yields a superset
+of `keras_model.weights` that only happened to convert correctly because the
+converter looks weights up by name. The reader instead uses the root's `variables`
+child -- Keras' serialized `model.variables`, whose children `"0"`, `"1"`, ... are
+exactly `keras_model.weights` in order -- and falls back to "reachable from the root
+except via `optimizer`/`keras_api`" only for SavedModels without it (e.g.
+`save_traces=False`, where node-id order differs from `.weights` order).
+
+Order matters: `species_order` is the first appearance of each
+`shortcut_{species}{N}` head. Verified identical names, values (bitwise) and order
+vs `tf_keras` on all four Illumina models (`tests/test_savedmodel.py::test_reader_matches_tf_keras_on_real_savedmodel`
+with `--keras-savedmodel-path`), and the resulting `.pt` state dicts are bitwise
+identical to the earlier TF-based conversions.
+
+## Preprocessing parallelism: thread pool + write_direct_chunk, not one process per core (`src/promoterai_torch/preprocess.py`)
+
+After the figwig switch, h5py's gzip filter (single-threaded, ~40 MiB/s raw) was
+~70% of a preprocess job and the per-sample xform/flip/transpose most of the rest,
+so extra figwig threads barely helped. Since each sample is its own HDF5 chunk,
+`_append_rows` deflates every row with `zlib.compress` (which releases the GIL)
+on a `ThreadPoolExecutor` and stores it with `dataset.id.write_direct_chunk`;
+`_finish_sample` (NaN fill, xform, flip, transpose) runs per sample on the same
+pool. The stored chunks are byte-identical to what h5py's own gzip filter writes
+at the same level (`test_threaded_compression_writes_same_chunks_as_h5py_gzip_filter`),
+so readers need nothing special. End to end on a synthetic chromosome: 5.3x at 8
+threads, 6.5x at 16. One `--threads` knob drives figwig and the pool; it defaults
+to `SLURM_CPUS_PER_TASK`, else `len(os.sched_getaffinity(0))` -- never
+`os.cpu_count()`, which reports the whole node and oversubscribes a restricted
+job. Threads share one ~2 GiB y buffer where processes each hold their own, so
+for many cores prefer fewer chromosomes in flight with more threads each.
 
 ## Numerical equivalence (`examples/`)
 

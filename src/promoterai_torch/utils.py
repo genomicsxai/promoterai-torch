@@ -336,6 +336,10 @@ def convert_tf_weights(
     """
     Convert a pretrained PromoterAI Keras SavedModel to a PyTorch checkpoint.
 
+    Weights are read directly from the SavedModel directory by
+    `promoterai_torch.savedmodel.read_savedmodel_variables`, so TensorFlow is
+    not required.
+
     Architecture (num_blocks, model_dim, output_dims, shortcut_layer_freq) is inferred
     from weight names. output_crop is derived from input_length - output_length when
     both are provided. input_length and output_length are stored as metadata.
@@ -349,21 +353,12 @@ def convert_tf_weights(
     """
     import re
 
-    try:
-        import tf_keras
-    except ImportError:
-        raise ImportError(
-            "tensorflow and tf-keras are required for weight conversion. "
-            "Install with: pip install tensorflow tf-keras"
-        )
-
     from promoterai_torch.architecture import PromoterAI
+    from promoterai_torch.savedmodel import read_savedmodel_variables
 
-    print(f"Loading Keras model from {keras_model_path} ...")
-    keras_model = tf_keras.models.load_model(keras_model_path)
-
-    # Flat weight dict: strip trailing ':0' from TF variable names
-    w = {v.name.rstrip(":0"): v.numpy() for v in keras_model.weights}
+    print(f"Loading Keras SavedModel weights from {keras_model_path} ...")
+    # Read straight from the SavedModel files (numpy only, no TensorFlow).
+    w = read_savedmodel_variables(keras_model_path)
 
     # ── Infer architecture ────────────────────────────────────────────────────
     if "dense/kernel" not in w:
@@ -431,13 +426,17 @@ def convert_tf_weights(
     )
 
     # ── Build PyTorch model ───────────────────────────────────────────────────
-    pt_model = PromoterAI(
-        num_blocks=num_blocks,
-        model_dim=model_dim,
-        output_dims=output_dims,
-        shortcut_layer_freq=shortcut_layer_freq,
-        output_crop=output_crop,
-    )
+    # Built on the meta device: every tensor is overwritten by the converted
+    # weights below, so allocating and randomly initializing a full-size model
+    # first (~65% of conversion time at the published scale) is wasted work.
+    with torch.device("meta"):
+        pt_model = PromoterAI(
+            num_blocks=num_blocks,
+            model_dim=model_dim,
+            output_dims=output_dims,
+            shortcut_layer_freq=shortcut_layer_freq,
+            output_crop=output_crop,
+        )
     new_sd: dict[str, torch.Tensor] = {}
 
     # ── Stem: Dense (4, model_dim) → Conv1d (model_dim, 4, 1) ────────────────
@@ -494,18 +493,28 @@ def convert_tf_weights(
             )
 
     # ── Load and verify ───────────────────────────────────────────────────────
-    missing = set(pt_model.state_dict()) - set(new_sd)
-    extra = set(new_sd) - set(pt_model.state_dict())
+    expected = pt_model.state_dict()
+    missing = set(expected) - set(new_sd)
+    extra = set(new_sd) - set(expected)
+    if missing:
+        # A meta-device model has no values to fall back on, and a checkpoint
+        # with silently random-initialized tensors would be wrong anyway.
+        raise ValueError(
+            f"{len(missing)} PyTorch tensors have no Keras counterpart: {sorted(missing)[:3]}..."
+        )
     if extra:
         print(
             f"  Warning: {len(extra)} unexpected keys ignored: {sorted(extra)[:3]}..."
         )
-    if missing:
-        print(
-            f"  Warning: {len(missing)} keys not converted (will use random init): {sorted(missing)[:3]}..."
-        )
+        new_sd = {k: v for k, v in new_sd.items() if k in expected}
 
-    pt_model.load_state_dict(new_sd, strict=False)
+    # Contiguous, own-storage copies (not transposed views of the numpy arrays),
+    # in the module's dtypes, so the saved checkpoint matches a copy-based load.
+    new_sd = {
+        k: v.to(expected[k].dtype).clone(memory_format=torch.contiguous_format)
+        for k, v in new_sd.items()
+    }
+    pt_model.load_state_dict(new_sd, strict=True, assign=True)
 
     args_dict: dict = {
         "num_blocks": num_blocks,
@@ -523,7 +532,4 @@ def convert_tf_weights(
     torch.save(
         {"model_state_dict": pt_model.state_dict(), "args": args_dict}, output_pt_path
     )
-    n_converted = len(new_sd) - len(missing)
-    print(
-        f"Converted {n_converted}/{len(pt_model.state_dict())} tensors → {output_pt_path}"
-    )
+    print(f"Converted {len(new_sd)}/{len(expected)} tensors → {output_pt_path}")

@@ -46,6 +46,7 @@ jobs where both runtimes can coexist in GPU memory.
 | `src/promoterai_torch/score.py`                 | Variant effect scoring                                                                |
 | `src/promoterai_torch/cli.py`                   | Unified `promoterai-torch` entry point                                                |
 | `src/promoterai_torch/utils.py`                 | LR/WD scheduler, checkpoint, TF weight converter                                      |
+| `src/promoterai_torch/savedmodel.py`            | TensorFlow-free Keras SavedModel variable reader used by the converter                |
 | `examples/compare_tf_torch_tracks_random.py`    | Full-track TF/Torch parity on deterministic random one-hot sequences                  |
 | `examples/compare_tf_torch_tracks_promoters.py` | Full-track TF/Torch parity on chosen genomic promoters                                |
 | `examples/track_parity_utils.py`                | Shared parity helpers; handles multi-species TF dict outputs and VRAM cleanup helpers |
@@ -54,9 +55,11 @@ jobs where both runtimes can coexist in GPU memory.
 
 Core install (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tqdm`. No TensorFlow dependency for inference.
 
-`[convert]` extra adds: `tensorflow`, `tf-keras`. Required for `promoterai-torch convert`; downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints). Don't add a platform-conditional `tensorflow-cpu` variant here — `tf-keras` itself unconditionally requires plain `tensorflow`, so installing `tensorflow-cpu` alongside it pulls in both packages, which install conflicting builds of the same files (e.g. `tensorflow/libtensorflow_cc.so.2`) into the same site-packages path, producing an ABI-mismatched "undefined symbol" import error on Linux.
+`promoterai-torch convert` needs only the core install: `savedmodel.py` reads a Keras SavedModel's variables straight from `saved_model.pb` + the `variables/` tensor bundle with numpy (verified bitwise-identical to `tf_keras.models.load_model(...).weights`, same order, on all four Illumina models). Downstream users must convert the Illumina SavedModel themselves (license restrictions prevent distributing pre-converted checkpoints). There is no `[convert]` extra any more.
 
-`[train]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `pybigtools` (preprocessing). Required for `preprocess`, `train`, and `SequenceDataset`.
+The `tf` dependency group (`tensorflow`, `tf-keras`, gated to Python < 3.14 because TF has no 3.14 wheels) is only for the cross-framework equivalence tests and track-parity examples. Don't add a platform-conditional `tensorflow-cpu` variant there — `tf-keras` itself unconditionally requires plain `tensorflow`, so installing `tensorflow-cpu` alongside it pulls in both packages, which install conflicting builds of the same files (e.g. `tensorflow/libtensorflow_cc.so.2`) into the same site-packages path, producing an ABI-mismatched "undefined symbol" import error on Linux.
+
+`[train]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `figwig` (preprocessing; pure-Python + numba, batched multithreaded BigWig reads). Required for `preprocess`, `train`, and `SequenceDataset`.
 
 ## Model Architecture
 
@@ -91,6 +94,7 @@ Published hyperparameters: `num_blocks=24`, `model_dim=1024`, `input_length=2048
 - Optimizer: `AdamW`; gradient clip `max_norm=1e-4` (fine-tuning: `1.0`). Keras' `AdamW` hardcodes a non-adaptive epsilon placement that PyTorch's doesn't replicate, causing a transient (first ~1,000 steps) update-magnitude difference even with matching `epsilon=1e-7` — see "AdamW epsilon convention differs between Keras and PyTorch" in `notes/implementation.md`
 - Multi-species `compute_loss` must keep an inactive species' (dummy-target, zero-weighted) loss term in the graph rather than skipping it — a hard skip leaves that head's gradient `None` instead of a real zero, so PyTorch's optimizer would then also skip its weight decay that batch, unlike Keras' `AdamW` (which applies weight decay unconditionally to every variable passed to `apply_gradients`) — see "Multi-species loss must use a soft zero, not a hard skip" in `notes/implementation.md`
 - Multi-species training batches must be species-homogeneous — `build_weighted_dataloader`'s `_SpeciesBatchSampler` picks one species per whole batch (weighted by dataset size), matching Illumina's `sample_from_datasets` over already-batched per-species streams; sampling individual rows across species (the old approach) crashes `collate_fn` once species have different real output shapes — see "Multi-species batches must be species-homogeneous" in `notes/implementation.md`
+- Preprocessing stores one sample per HDF5 chunk (training reads random single rows) and multithreads BigWig reads, per-sample finishing, and gzip (zlib on a thread pool + `write_direct_chunk`, byte-identical to h5py's filter) via `--threads`, defaulting to the CPUs actually allocated (Slurm/affinity, not `os.cpu_count()`) — see "Preprocessing parallelism" in `notes/implementation.md`
 - Preprocessing keeps a too-close-to-a-chromosome-edge TSS as an all-zero row (zero-weighted downstream via `x.max()==0`), matching Illumina's `generator.py`, rather than dropping it — dropping it shrinks that chromosome's sample count and skews multi-species sampling ratios — see "Boundary TSS rows should stay in the dataset as zero rows" in `notes/implementation.md`
 - `convert_tf_weights` saves `species_order` (the real, first-appearance order of `shortcut_{species}{N}` weights — not necessarily human-first) into the checkpoint's `args`; any cross-framework test/tool aligning a multi-species Keras output dict to the PyTorch model's `output_heads` must use that, not a human/mouse name heuristic on the dict's keys — see "Cross-framework test harness must use convert_tf_weights' real species_order" in `notes/implementation.md`
 - LR schedule (`make_lr_lambda`): linear warmup 0→10% epochs, constant 10→90%, linear decay 90→100%
@@ -109,12 +113,14 @@ Full predicted regulatory tracks are validated by `examples/compare_tf_torch_tra
 
 Beyond score/track parity (eval mode), **training-step gradient equivalence** was verified on real published checkpoints (GPU) via `tests/test_tf_gradient_equivalence_real.py` and `tests/test_tf_gradient_equivalence_finetune_real.py`, covering all four variants: `hg38` and `hg38_mm10` (base, from-scratch/`train.py` scenario) and `hg38_finetune`/`hg38_mm10_finetune` (fine-tuned/`TwinModel` scenario). All four pass; the base models' forward-pass prediction agreement is cosine=1.0000 with relative L2 under 0.5% (single- and multi-species, both heads). See PR #11 for the full run logs and notes/implementation.md for the diagnostic journey (species ordering, TF32/oneDNN precision, and the frozen-BatchNorm-in-fine-tuning distinction that required the separate finetune test).
 
+The TF-free SavedModel reader (`savedmodel.py`) is covered without TensorFlow by `tests/test_savedmodel.py` against a committed toy SavedModel (`tests/data/toy_savedmodel`, regenerate with `tests/data/make_toy_savedmodel.py`). After touching it, also check it against `tf_keras` on each real Illumina model (needs the `tf` group): `uv run pytest tests/test_savedmodel.py -k real --keras-savedmodel-path /path/to/model` — see "Reading SavedModels without TensorFlow" in `notes/implementation.md`.
+
 When changing parity examples, add or update tests in `tests/test_track_parity_examples.py`. These tests avoid the licensed SavedModels but cover dict-output normalization, per-head error calculation, random sequence generation, promoter sequence extraction, and CLI help smoke checks.
 
-`tests/test_tf_gradient_equivalence.py` runs one real cross-framework training step (Keras and PyTorch, identical converted weights and batch, toy 8-block/dim-16 scale) and compares loss, raw/post-clip gradients, AdamW parameter deltas, and BatchNorm running stats — it does not need the licensed SavedModels. Along with `tests/test_convert.py`, it requires the `convert` extra (`tensorflow`/`tf-keras`) and is skipped by default, including in per-PR CI. Run both locally before merging any change to `architecture.py`, `train.py`, `finetune.py`, or the weight converter in `utils.py`:
+`tests/test_tf_gradient_equivalence.py` runs one real cross-framework training step (Keras and PyTorch, identical converted weights and batch, toy 8-block/dim-16 scale) and compares loss, raw/post-clip gradients, AdamW parameter deltas, and BatchNorm running stats — it does not need the licensed SavedModels. Along with `tests/test_convert.py`, it requires the `tf` dependency group (`tensorflow`/`tf-keras`) and is skipped by default, including in per-PR CI. Run both locally before merging any change to `architecture.py`, `train.py`, `finetune.py`, or the weight converter in `utils.py`:
 
 ```sh
-uv sync --group dev --extra convert
+uv sync --group dev --group tf
 uv run pytest tests/test_convert.py tests/test_tf_gradient_equivalence.py -v
 ```
 

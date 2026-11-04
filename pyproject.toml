@@ -10,7 +10,7 @@ authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10"
 keywords = [
     "bioinformatics",
     "deep-learning",
@@ -31,6 +31,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
@@ -49,20 +50,23 @@ Repository = "https://github.com/genomicsxai/promoterai-torch"
 Issues = "https://github.com/genomicsxai/promoterai-torch/issues"
 
 [project.optional-dependencies]
-convert = [
-    "tensorflow",
-    "tf-keras",
-]
-train = ["h5py>=3.0", "pybigtools>=0.2.5"]
-interpret = ["tangermeme>=0.5"]
+train = ["h5py>=3.0", "figwig>=0.2.0"]
+interpret = ["tangermeme>=1.6"]
 wandb = ["wandb>=0.16"]
 
 [dependency-groups]
 test = [
     "pytest>=8",
     "h5py>=3.0",
-    "pybigtools>=0.2.5",
-    "tangermeme>=0.5",
+    "figwig>=0.2.0",
+    "tangermeme>=1.6",
+]
+# TensorFlow/tf-keras are only needed by the cross-framework equivalence tests
+# (conversion itself reads SavedModels with numpy). No TF wheels exist for
+# Python 3.14 yet, so those tests skip there.
+tf = [
+    "tensorflow; python_version < '3.14'",
+    "tf-keras; python_version < '3.14'",
 ]
 publish = ["build>=1.2", "twine>=5.0"]
 dev = [{ include-group = "test" }, { include-group = "publish" }]

@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -173,3 +175,56 @@ def test_preprocess_reports_missing_figwig(tmp_path, monkeypatch):
             output_length=4,
             chunk_size=1,
         )
+
+
+def test_threaded_compression_writes_same_chunks_as_h5py_gzip_filter(tmp_path):
+    """--threads only changes speed: the pooled zlib + write_direct_chunk path
+    must store the exact chunk bytes that h5py's own gzip filter writes."""
+    rng = np.random.default_rng(0)
+    L = 400
+    fasta_path = tmp_path / "g.fa"
+    fasta_path.write_text(">chr1\n" + "".join(rng.choice(list("ACGT"), L)) + "\n")
+    tss_path = tmp_path / "tss.tsv"
+    pd.DataFrame(
+        {"chrom": "chr1", "pos": rng.integers(1, L, 23), "strand": rng.choice(["+", "-"], 23)}
+    ).to_csv(tss_path, sep="\t", index=False)
+    bws = []
+    for name in ("a", "b"):
+        values = rng.gamma(1.0, 2.0, L) * (rng.random(L) < 0.5)
+        bws.append(_write_bigwig(tmp_path / f"{name}.bw", {"chr1": L}, "chr1", values))
+    bw_path = tmp_path / "bigwigs.tsv"
+    pd.DataFrame(
+        [{"fwd": bws[0], "rev": bws[1], "xform": "np.arcsinh"}] * 2
+    ).to_csv(bw_path, sep="\t", index=False)
+
+    def run(threads):
+        out = tmp_path / f"h5_{threads}"
+        preprocess.preprocess_chrom(
+            tss_file=str(tss_path),
+            fasta_file=str(fasta_path),
+            bigwig_files_tsv=str(bw_path),
+            chrom="chr1",
+            hdf5_folder=str(out),
+            input_length=64,
+            output_length=32,
+            chunk_size=5,
+            threads=threads,
+        )
+        return h5py.File(out / "chr1.h5", "r")
+
+    with run(1) as serial, run(3) as threaded:
+        for name in ("x", "y"):
+            a, b = serial[name], threaded[name]
+            assert a.shape == b.shape and a.shape[0] == 23
+            assert (a.compression, a.compression_opts) == (b.compression, b.compression_opts)
+            np.testing.assert_array_equal(a[:], b[:])
+            zeros = (0,) * (a.ndim - 1)
+            for i in range(a.shape[0]):
+                assert a.id.read_direct_chunk((i, *zeros)) == b.id.read_direct_chunk((i, *zeros))
+
+
+def test_available_cpus_prefers_slurm_allocation(monkeypatch):
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "3")
+    assert preprocess._available_cpus() == 3
+    monkeypatch.delenv("SLURM_CPUS_PER_TASK")
+    assert 1 <= preprocess._available_cpus() <= (os.cpu_count() or 1)

@@ -10,9 +10,14 @@ file per chromosome, stored one sample per HDF5 chunk for fast random-row reads
 during training. The y buffer is chunk_size x output_length x n_tracks float32
 (64 x 16384 x 498 is ~2 GiB), so lower --chunk_size for many tracks.
 
-Chromosomes are independent; run one process per chromosome in parallel (e.g.
-with GNU parallel) -- gzip compression of the HDF5 output, not BigWig reading,
-dominates the run time and is single-threaded per process.
+Both expensive steps are multithreaded with --threads (default: the CPUs this
+process may use): figwig decompresses BigWig blocks on that many threads, and
+each sample's HDF5 chunk is gzip-compressed on a thread pool (zlib releases the
+GIL) and stored with write_direct_chunk -- byte-for-byte what h5py's own gzip
+filter writes, so readers are unaffected. Chromosomes are independent, so
+several can also run at once (e.g. with GNU parallel); keep processes x
+--threads at about the core count. Threads share one buffer while every process
+holds its own, so prefer fewer processes with more threads when memory is tight.
 
 Usage:
     python -m promoterai_torch.preprocess \
@@ -25,6 +30,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -43,25 +50,52 @@ except ImportError as exc:
     figwig = None
     _figwig_import_error = exc
 
-# Threads figwig uses to decompress BigWig blocks for each batched read.
-_BIGWIG_THREADS = min(8, os.cpu_count() or 1)
+_GZIP_LEVEL = 4
 
 
-def _read_tracks(readers, chrom, starts, width):
+def _available_cpus() -> int:
+    """CPUs this process may actually use, not the node's total core count.
+
+    Slurm's per-task allocation if set, else the CPU affinity mask (which
+    reflects taskset and Slurm/cgroup cpusets); os.cpu_count() would report
+    every core on the node and oversubscribe a restricted job.
+    """
+    slurm = os.environ.get("SLURM_CPUS_PER_TASK", "")
+    if slurm.isdigit() and int(slurm) > 0:
+        return int(slurm)
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # not available on macOS/Windows
+        return os.cpu_count() or 1
+
+
+def _read_tracks(readers, chrom, starts, width, n_jobs=1):
     """Read one window per start from every reader, as (n, len(readers), width).
 
-    Bases past the chromosome end (NaN in figwig), uncovered bases, and a chrom
-    absent from a file are all 0, matching pybigtools'
+    Uncovered bases and a chrom absent from a file are 0. Bases past the
+    chromosome end are NaN in figwig's output and are left that way here;
+    `_finish_sample` turns them into 0, matching pybigtools'
     `values(..., missing=0.0, oob=0.0)`. Every start must be >= 0.
     """
     starts = np.asarray(starts, dtype=np.int64)
-    out = np.zeros((len(starts), len(readers), width), dtype="float32")
+    out = np.empty((len(starts), len(readers), width), dtype="float32")
     if len(starts):
-        figwig.read_bigwig(
-            list(readers), chrom, starts, width, out=out, n_jobs=_BIGWIG_THREADS
-        )
-        np.nan_to_num(out, copy=False, nan=0.0)
+        figwig.read_bigwig(list(readers), chrom, starts, width, out=out, n_jobs=n_jobs)
     return out
+
+
+def _finish_sample(tracks: np.ndarray, xforms, minus: bool, out: np.ndarray) -> None:
+    """Turn one sample's raw (n_tracks, width) BigWig values into its y row.
+
+    Zero-fills past-chromosome-end NaNs, applies each track's xform, then
+    flips (minus strand) and transposes into out (width, n_tracks). Runs on the
+    thread pool, one sample per task: numpy releases the GIL for these
+    elementwise ops and copies, and samples write disjoint rows.
+    """
+    np.copyto(tracks, 0.0, where=np.isnan(tracks))
+    for j, xform in enumerate(xforms):
+        tracks[j] = xform(tracks[j])
+    out[...] = (tracks[:, ::-1] if minus else tracks).T
 
 
 def _compile_xform(expr: str):
@@ -90,15 +124,30 @@ def _create_growable_dataset(f: h5py.File, name: str, sample_shape: tuple) -> h5
         dtype="float32",
         chunks=(1, *sample_shape),
         compression="gzip",
-        compression_opts=4,
+        compression_opts=_GZIP_LEVEL,
     )
 
 
-def _append_rows(dataset: h5py.Dataset, rows: np.ndarray) -> None:
-    """Grow dataset by len(rows) and write them into the newly added slice."""
+def _append_rows(
+    dataset: h5py.Dataset, rows: np.ndarray, pool: ThreadPoolExecutor | None = None
+) -> None:
+    """Grow dataset by len(rows) and write them into the newly added rows.
+
+    With a pool, each row (= one HDF5 chunk) is deflated on the pool's threads
+    with zlib at the dataset's gzip level and stored as-is via
+    write_direct_chunk. That gives the same chunk bytes h5py's gzip filter
+    would write itself, single-threaded.
+    """
     start = dataset.shape[0]
     dataset.resize(start + len(rows), axis=0)
-    dataset[start:] = rows
+    if pool is None:
+        dataset[start:] = rows
+        return
+    rows = np.ascontiguousarray(rows, dtype=dataset.dtype)
+    zeros = (0,) * (rows.ndim - 1)
+    compressed = pool.map(lambda row: zlib.compress(memoryview(row), _GZIP_LEVEL), rows)
+    for i, blob in enumerate(compressed):
+        dataset.id.write_direct_chunk((start + i, *zeros), blob)
 
 
 def preprocess_chrom(
@@ -110,9 +159,16 @@ def preprocess_chrom(
     input_length: int,
     output_length: int,
     chunk_size: int,
+    threads: int | None = None,
 ):
-    """Extract sequences and BigWig tracks for all TSS on chrom and write one HDF5 file."""
+    """Extract sequences and BigWig tracks for all TSS on chrom and write one HDF5 file.
+
+    threads: threads for BigWig decompression and HDF5 gzip compression
+    (default: the CPUs available to this process; 1 disables the thread pool).
+    """
     import h5py  # optional train dependency, kept out of module-level imports
+
+    threads = _available_cpus() if threads is None else max(1, int(threads))
 
     df_tss = pd.read_csv(tss_file, sep="\t")
     df_tss = df_tss[df_tss["chrom"] == chrom].reset_index(drop=True)
@@ -155,23 +211,24 @@ def preprocess_chrom(
     def build_y() -> np.ndarray:
         """Batch-read the buffered samples' tracks; (n, output_length, n_tracks).
 
-        Each strand's windows are read in one call into an (k, n_tracks,
-        output_length) scratch array, transformed in place, then flipped
-        (minus strand) and transposed straight into the output, so peak memory
-        is the output plus one strand's scratch. Boundary rows stay all-zero,
-        even when xform(0) != 0.
+        Each strand's windows are read in one multithreaded figwig call into a
+        (k, n_tracks, output_length) scratch array; each sample is then
+        finished (NaN fill, xform, flip, transpose) into its row of the output
+        on the thread pool. Peak memory is the output plus one strand's
+        scratch. Boundary rows stay all-zero, even when xform(0) != 0.
         """
         ys = np.zeros((len(buf), output_length, n_tracks), dtype="float32")
+        run = pool.map if pool is not None else map
         for minus, readers in ((False, bws_fwd), (True, bws_rev)):
             idx = [i for i, (x, _, m) in enumerate(buf) if x is not None and m == minus]
             if not idx:
                 continue
-            tracks = _read_tracks(readers, chrom, [buf[i][1] for i in idx], output_length)
-            for j, xform in enumerate(bw_xforms):
-                tracks[:, j] = xform(tracks[:, j])
-            if minus:
-                tracks = tracks[:, :, ::-1]
-            ys[idx] = tracks.transpose(0, 2, 1)
+            tracks = _read_tracks(
+                readers, chrom, [buf[i][1] for i in idx], output_length, n_jobs=threads
+            )
+            # list() drains the iterator so every task finishes (and raises) here.
+            list(run(lambda k: _finish_sample(tracks[k], bw_xforms, minus, ys[idx[k]]),
+                     range(len(idx))))
         return ys
 
     def flush(force=False):
@@ -188,40 +245,45 @@ def preprocess_chrom(
             h5_file = h5py.File(hdf5_path, "w")
             x_ds = _create_growable_dataset(h5_file, "x", xs.shape[1:])
             y_ds = _create_growable_dataset(h5_file, "y", ys.shape[1:])
-        _append_rows(x_ds, xs)
-        _append_rows(y_ds, ys)
+        _append_rows(x_ds, xs, pool)
+        _append_rows(y_ds, ys, pool)
         total_rows += len(buf)
         print(f"Wrote {len(buf)} samples ({total_rows} total) to {hdf5_path}")
         buf = []
 
-    strands = df_tss["strand"] if "strand" in df_tss.columns else [1] * len(df_tss)
-    for pos, strand in zip(df_tss["pos"], strands):
-        pos = int(pos) - 1  # 0-based
-        is_minus = strand in (-1, "-1", "-")
-        bw_start = pos - half_out
+    pool = ThreadPoolExecutor(threads) if threads > 1 else None
+    try:
+        strands = df_tss["strand"] if "strand" in df_tss.columns else [1] * len(df_tss)
+        for pos, strand in zip(df_tss["pos"], strands):
+            pos = int(pos) - 1  # 0-based
+            is_minus = strand in (-1, "-1", "-")
+            bw_start = pos - half_out
 
-        seq_str = (
-            str(fasta[chrom][pos - half_in : pos + half_in]).upper()
-            if pos - half_in >= 0
-            else ""
-        )
-        if len(seq_str) < input_length or bw_start < 0:
-            # Too close to a chromosome edge for a full window. Illumina's
-            # generator.py keeps this TSS as an all-zero row (rather than
-            # dropping it) so it stays in the dataset and gets zero-weighted
-            # downstream via _prepare_sample's x.max()==0 check; mirror that
-            # instead of shrinking the dataset and skewing per-species sizes.
-            buf.append((None, 0, is_minus))
-        else:
-            x = onehot_encode(seq_str)
-            buf.append((x[::-1, ::-1] if is_minus else x, bw_start, is_minus))
+            seq_str = (
+                str(fasta[chrom][pos - half_in : pos + half_in]).upper()
+                if pos - half_in >= 0
+                else ""
+            )
+            if len(seq_str) < input_length or bw_start < 0:
+                # Too close to a chromosome edge for a full window. Illumina's
+                # generator.py keeps this TSS as an all-zero row (rather than
+                # dropping it) so it stays in the dataset and gets zero-weighted
+                # downstream via _prepare_sample's x.max()==0 check; mirror that
+                # instead of shrinking the dataset and skewing per-species sizes.
+                buf.append((None, 0, is_minus))
+            else:
+                x = onehot_encode(seq_str)
+                buf.append((x[::-1, ::-1] if is_minus else x, bw_start, is_minus))
 
-        if len(buf) >= chunk_size:
-            flush()
+            if len(buf) >= chunk_size:
+                flush()
 
-    flush(force=True)
-    if h5_file is not None:
-        h5_file.close()
+        flush(force=True)
+    finally:
+        if pool is not None:
+            pool.shutdown()
+        if h5_file is not None:
+            h5_file.close()
 
     if total_rows:
         print(f"Preprocessing complete for {chrom}: {total_rows} samples written to {hdf5_path}.")
@@ -264,6 +326,15 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         "appended to the chromosome's HDF5 file together; the y buffer is "
         "chunk_size x output_length x n_tracks float32 (default: %(default)s)",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Threads for BigWig decompression and HDF5 gzip compression "
+        "(default: the CPUs available to this process -- SLURM_CPUS_PER_TASK, "
+        "else the CPU affinity mask). When running several chromosomes at once, "
+        "keep processes x threads at about the core count.",
+    )
     return parser
 
 
@@ -282,6 +353,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         input_length=args.input_length,
         output_length=args.output_length,
         chunk_size=args.chunk_size,
+        threads=args.threads,
     )
 
 

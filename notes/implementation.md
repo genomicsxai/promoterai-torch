@@ -333,6 +333,23 @@ vs `tf_keras` on all four Illumina models (`tests/test_savedmodel.py::test_reade
 with `--keras-savedmodel-path`), and the resulting `.pt` state dicts are bitwise
 identical to the earlier TF-based conversions.
 
+## Preprocessing parallelism: thread pool + write_direct_chunk, not one process per core (`src/promoterai_torch/preprocess.py`)
+
+After the figwig switch, h5py's gzip filter (single-threaded, ~40 MiB/s raw) was
+~70% of a preprocess job and the per-sample xform/flip/transpose most of the rest,
+so extra figwig threads barely helped. Since each sample is its own HDF5 chunk,
+`_append_rows` deflates every row with `zlib.compress` (which releases the GIL)
+on a `ThreadPoolExecutor` and stores it with `dataset.id.write_direct_chunk`;
+`_finish_sample` (NaN fill, xform, flip, transpose) runs per sample on the same
+pool. The stored chunks are byte-identical to what h5py's own gzip filter writes
+at the same level (`test_threaded_compression_writes_same_chunks_as_h5py_gzip_filter`),
+so readers need nothing special. End to end on a synthetic chromosome: 5.3x at 8
+threads, 6.5x at 16. One `--threads` knob drives figwig and the pool; it defaults
+to `SLURM_CPUS_PER_TASK`, else `len(os.sched_getaffinity(0))` -- never
+`os.cpu_count()`, which reports the whole node and oversubscribes a restricted
+job. Threads share one ~2 GiB y buffer where processes each hold their own, so
+for many cores prefer fewer chromosomes in flight with more threads each.
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

@@ -59,6 +59,8 @@ Core install (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfa
 
 The `tf` dependency group (`tensorflow`, `tf-keras`, gated to Python < 3.14 because TF has no 3.14 wheels) is only for the cross-framework equivalence tests and track-parity examples. Don't add a platform-conditional `tensorflow-cpu` variant there — `tf-keras` itself unconditionally requires plain `tensorflow`, so installing `tensorflow-cpu` alongside it pulls in both packages, which install conflicting builds of the same files (e.g. `tensorflow/libtensorflow_cc.so.2`) into the same site-packages path, producing an ABI-mismatched "undefined symbol" import error on Linux.
 
+PyTorch build selection (uv only): dependency groups `cu126` (CUDA 12.6, the last build line supporting Maxwell/Pascal/Volta sm_50-sm_70), `cu130` and `cpu` route `torch` to PyTorch's own indexes via `[tool.uv.sources]`; they are mutually exclusive (`[tool.uv] conflicts`), and without one torch comes from PyPI (CUDA 13.0, sm_75+). They are groups rather than extras so they never reach the published metadata. Pass the same group to every `uv sync`/`uv run`, or uv swaps the environment back to the PyPI build. Don't pin torch in `[project]` for this: the `cu126` fork resolves its own (older) torch automatically.
+
 `[train]` extra adds: `h5py` (HDF5 training data), `scipy` (shift augmentation), `figwig` (preprocessing; pure-Python + numba, batched multithreaded BigWig reads). Required for `preprocess`, `train`, and `SequenceDataset`.
 
 ## Model Architecture

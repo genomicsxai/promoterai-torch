@@ -364,6 +364,43 @@ one-hot x stays one chunk). With the 498-track chunk geometry, reads went from 6
 to 3.4 ms per sample. Threaded `write_direct_chunk` writes zero-pad a row's partial
 last chunk, which matches what h5py's filter stores byte for byte.
 
+## Incremental (fastISM-style) substitution scoring (`src/promoterai_torch/incremental.py`)
+
+PromoterAI's ops are position-wise (kernel-1 stem, eval BatchNorm, FFN, head
+projections + ReLU) or kernel-5 dilated depthwise convs, so an edit on [lo, hi)
+changes block b's output only on [lo, hi) widened by 2*d_i on each side for every
+block i <= b. Summed over the 24 published blocks, that is ~12% of the positions a
+full pass computes, and `TwinModel`'s mean(head(alt) - head(ref)) is exactly zero
+outside it. `score.py` therefore groups same-length substitutions by site, caches the
+reference's 25 layer outputs (~2 GB fp32 at L=20480, C=1024), and recomputes each
+alt's window per block, zero-padding the conv input only where the window runs past
+the true sequence ends (padding='same' pads bn1's output). The edit span comes from
+where x_ref and x_alt differ, so strand flips, MNVs, N-padded edges and skipped
+(all-zero placeholder) variants need no special cases.
+
+tangermeme's generic fastISM (`saturation_mutagenesis(fast=True)`) classifies the
+whole backbone as local but did not help here: it silently skips jobs that would take
+< 30 s without it (one site is ~4 edits) and, at full width, caches every
+intermediate including the 4096-wide FFN activations and ran out of memory on a 12 GB
+GPU, falling back to the slow path after the failed attempt. It also targets ISM
+over a region of one fixed window, while variant scoring centers a window on each
+variant.
+
+Measured: 3 SNVs at one site on the real hg38_finetune model, 4.5x faster on a TITAN
+Xp (2.23 -> 0.57 s/variant), max |diff - TwinModel| 1.5e-8; 150 TERT SNVs through
+the CLI, 527 -> 100 s with 150/150 identical scores.
+
+The paper benchmark (`benchmark.score_variants`) goes through the same
+`score.variant_diffs`. All seven benchmark TSVs are substitutions; most have ~1.0
+variant per site (GTEx/UKBB/GEL/MPRA_eQTL), the saturation sets 1.7 (MPRA) and 2.4
+(CAGI5). On 100-variant subsets, hg38_finetune, TITAN Xp, end to end including
+model load: GTEx_outlier (99 sites) 351 -> 152 s (2.3x), CAGI5_saturation (63
+sites) 353 -> 105 s (3.4x), identical scores and AUROCs (and identical to a run on
+the TITAN X). So even at ~1 variant per site it measured 2.3x, more than the ~1.8x
+expected from the window arithmetic (not investigated). Multi-device runs used to
+split rows with `np.array_split`, which can cut a site across shards; they now
+split whole sites (`site_shards`), so each site's reference pass happens once.
+
 ## Numerical equivalence (`examples/`)
 
 Validated on TERT (*n*=6,006), SFSWAP, and DNAJC9 promoter variants using the `hg38_finetune` and `hg38_mm10_finetune` models. Scores are numerically identical to the original TF/Keras implementation across all comparisons (r=1.0000, MAE=0.0000), including the ensembled score against published PromoterAI output.

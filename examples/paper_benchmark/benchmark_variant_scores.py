@@ -56,6 +56,16 @@ def main() -> None:
         ),
     )
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument(
+        "--incremental",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Score same-length substitutions from one cached reference pass per site "
+            "(exact up to float rounding; default). --no-incremental uses full "
+            "ref/alt passes for every variant."
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
     args = parser.parse_args()
 
@@ -71,6 +81,7 @@ def main() -> None:
         devices=_split_devices(args.devices),
         num_workers=args.num_workers,
         datasets=args.dataset,
+        incremental=args.incremental,
         verbose=args.verbose,
     )
 

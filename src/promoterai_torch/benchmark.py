@@ -11,10 +11,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader
 
-from promoterai_torch.architecture import TwinModel
-from promoterai_torch.dataset import VariantDataset, collate_variant
+from promoterai_torch.score import variant_diffs
 from promoterai_torch.utils import DEFAULT_INPUT_LENGTH, load_pretrained
 
 BENCHMARK_BASE_URL = (
@@ -76,9 +74,15 @@ def score_variants(
     batch_size: int = 2,
     device: str | None = None,
     num_workers: int = 4,
+    incremental: bool = True,
     verbose: bool = False,
 ) -> np.ndarray:
-    """Score a variant dataframe with one torch checkpoint and return tanh-scaled scores."""
+    """Score a variant dataframe with one torch checkpoint and return tanh-scaled scores.
+
+    Same-length substitutions are scored incrementally (one cached reference pass
+    per site, as `promoterai-torch score` does) unless `incremental` is False;
+    indels always use full ref/alt passes.
+    """
     if len(df_var) == 0:
         return np.array([], dtype=np.float32)
 
@@ -86,32 +90,38 @@ def score_variants(
         device if device else "cuda" if torch.cuda.is_available() else "cpu"
     )
     base_model, _ = load_pretrained(str(model_checkpoint), map_location=str(torch_device))
-    twin_model = TwinModel(base_model).to(torch_device)
-    twin_model.eval()
-
-    dataset = VariantDataset(df_var, str(fasta_file), input_length)
-    loader = DataLoader(
-        dataset,
+    base_model = base_model.to(torch_device).eval()
+    diffs = variant_diffs(
+        base_model,
+        df_var,
+        fasta_file,
+        input_length,
+        device=torch_device,
         batch_size=batch_size,
-        shuffle=False,
         num_workers=num_workers,
-        collate_fn=collate_variant,
+        incremental=incremental,
+        verbose=verbose,
     )
-
-    all_diffs = []
-    with torch.no_grad():
-        batches = loader
-        if verbose:
-            from tqdm import tqdm
-
-            batches = tqdm(loader, desc=Path(model_checkpoint).stem, unit="batch")
-        for (x_ref, x_alt), _ in batches:
-            diff = twin_model(x_ref.to(torch_device), x_alt.to(torch_device))
-            all_diffs.append(diff.cpu().numpy())
-
     if torch_device.type == "cuda":
         torch.cuda.empty_cache()
-    return np.tanh(np.concatenate(all_diffs).round(4))
+    return np.tanh(diffs.round(4))
+
+
+def site_shards(df: pd.DataFrame, n: int) -> list[np.ndarray]:
+    """Split df's positional row indices into n shards of similar size, keeping every
+    (chrom, pos, strand) site in one shard so incremental scoring can reuse its
+    reference pass. Sites stay in first-appearance order."""
+    strand = df["strand"] if "strand" in df.columns else pd.Series(1, index=df.index)
+    site = pd.Series(list(zip(df["chrom"], df["pos"], strand))).factorize()[0]
+    rows_by_site = [np.flatnonzero(site == s) for s in range(site.max() + 1)] if len(df) else []
+    shards: list[list[np.ndarray]] = [[] for _ in range(n)]
+    target, filled, shard = len(df) / n, 0, 0
+    for rows in rows_by_site:
+        if shard < n - 1 and filled >= target * (shard + 1):
+            shard += 1
+        shards[shard].append(rows)
+        filled += len(rows)
+    return [np.sort(np.concatenate(s)) if s else np.array([], dtype=int) for s in shards]
 
 
 def benchmark_paths(
@@ -146,6 +156,7 @@ def score_benchmark_file(
     batch_size: int = 2,
     device: str | None = None,
     num_workers: int = 4,
+    incremental: bool = True,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Score one benchmark TSV and add the single-model or ensemble score."""
@@ -163,6 +174,7 @@ def score_benchmark_file(
             batch_size=batch_size,
             device=device,
             num_workers=num_workers,
+            incremental=incremental,
             verbose=verbose,
         )
     df["score"] = df[score_columns].mean(axis=1)
@@ -181,6 +193,7 @@ def _score_shard_worker(
     batch_size: int,
     num_workers: int,
     verbose: bool,
+    incremental: bool = True,
 ) -> None:
     """Score one dataframe shard in a child process and report arrays through a queue."""
     try:
@@ -196,6 +209,7 @@ def _score_shard_worker(
                 batch_size=batch_size,
                 device=device,
                 num_workers=num_workers,
+                incremental=incremental,
                 verbose=verbose,
             )
         queue.put(("ok", result))
@@ -213,9 +227,10 @@ def score_benchmark_file_multi_device(
     devices: list[str],
     batch_size: int = 2,
     num_workers: int = 0,
+    incremental: bool = True,
     verbose: bool = False,
 ) -> pd.DataFrame:
-    """Score one benchmark TSV by row-sharding it over multiple devices."""
+    """Score one benchmark TSV by sharding its variant sites over multiple devices."""
     if not devices:
         raise ValueError("devices must contain at least one device")
     if len(devices) == 1:
@@ -228,11 +243,12 @@ def score_benchmark_file_multi_device(
             batch_size=batch_size,
             device=devices[0],
             num_workers=num_workers,
+            incremental=incremental,
             verbose=verbose,
         )
 
     df = pd.read_csv(benchmark_tsv, sep="\t")
-    shard_indices = np.array_split(np.arange(len(df)), len(devices))
+    shard_indices = site_shards(df, len(devices))
     ctx = mp.get_context("spawn")
     queue = ctx.Queue()
     processes = []
@@ -260,6 +276,7 @@ def score_benchmark_file_multi_device(
                 batch_size,
                 num_workers,
                 verbose,
+                incremental,
             ),
         )
         process.start()
@@ -398,6 +415,7 @@ def run_benchmarks(
     devices: list[str] | None = None,
     num_workers: int = 4,
     datasets: Iterable[str] | None = None,
+    incremental: bool = True,
     verbose: bool = False,
 ) -> list[dict[str, object]]:
     """Score every downloaded benchmark TSV and write scored TSVs plus metrics."""
@@ -415,6 +433,7 @@ def run_benchmarks(
             "input_length": input_length,
             "batch_size": batch_size,
             "num_workers": num_workers,
+            "incremental": incremental,
             "verbose": verbose,
         }
         if resolved_devices is not None:

@@ -118,6 +118,17 @@ promoterai-torch score \
 
 Scores are written by default to `variants.{model_name}.tsv` as a new `score` column in [−1, 1] (or to a file path provided by `--output`). Thresholds: ±0.1 (weak effect), ±0.2 (moderate), ±0.5 (strong).
 
+Same-length substitutions (SNVs and MNVs) are scored incrementally by default:
+each site's reference window runs through the model once, and each alt then
+recomputes only the window of every layer its edit can reach (the fastISM idea,
+exact up to floating-point rounding), so the three SNVs at a site cost about one
+full pass plus three small ones instead of six full passes. On 150 TERT promoter
+SNVs (50 sites) this took 100 s instead of 527 s on a TITAN Xp, with identical
+scores. Indels always use full ref/alt passes. Pass `--no-incremental` to score
+everything with full passes. The paper benchmark
+(`examples/paper_benchmark/benchmark_variant_scores.py`) scores the same way and
+takes the same flag.
+
 ### Run inference on a genomic sequence
 
 One can also generate predictions for all the tracks that PromoterAI was trained on (these are aggregated and diff'ed to generate the variant scores).

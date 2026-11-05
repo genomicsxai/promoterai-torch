@@ -43,6 +43,14 @@ python examples/paper_benchmark/benchmark_variant_scores.py \
 Omit `--hg38_mm10_finetune_checkpoint` to benchmark with only the
 `hg38_finetune` checkpoint.
 
+Like `promoterai-torch score`, the benchmark scores substitutions incrementally by
+default (one cached reference pass per variant site; see the README's scoring
+section), and every benchmark variant is a substitution. Multi-device runs shard
+by site, so a site's variants share that pass. On 100-variant subsets with
+`hg38_finetune` on a TITAN Xp, this took GTEx_outlier (99 sites) from 351 to 152 s
+and CAGI5_saturation (63 sites) from 353 to 105 s, with identical scores and
+AUROCs. Pass `--no-incremental` for full ref/alt passes.
+
 To benchmark the official TensorFlow/Keras SavedModels from
 [Illumina/PromoterAI](https://github.com/Illumina/PromoterAI), install the
 official `promoterai` package in an environment with TensorFlow and use the

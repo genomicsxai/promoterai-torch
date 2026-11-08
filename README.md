@@ -187,7 +187,7 @@ uv add promoterai-torch --extra interpret
 the model's mean prediction with an engine written for this architecture. It gives
 the same attributions as [`tangermeme`](https://github.com/jmschrei/tangermeme)'s
 `deep_lift_shap` (same dinucleotide-shuffled references for a given `random_state`,
-same rescale rule), but the full published model fits on a 12 GB GPU:
+same rescale rule), but the full published model fits on a 10 GB GPU:
 
 ```python
 from promoterai_torch.attribution import deep_lift_shap
@@ -213,9 +213,10 @@ the GPU per step is chosen to saturate it within the free device memory; pass
 `ref_chunk` / `batch_size` / `max_memory` to override it. `compile=True` fuses the
 elementwise work: `torch.compile` on CPUs and CUDA GPUs of compute capability 7.0+,
 and TorchScript's fuser on older GPUs (e.g. Pascal), where `torch.compile`'s Triton
-backend doesn't run. The Pascal path is measured below (~12% faster); the
-`torch.compile` GPU path is so far only validated for correctness on CPU, not
-benchmarked on a 7.0+ GPU.
+backend doesn't run. Both are measured below: TorchScript on Pascal is ~12% faster,
+and `torch.compile` on an RTX 3080 (compute capability 8.6) is ~21% faster once
+compiled (the first call adds ~12 s of compilation), agreeing with eager to a
+relative L2 of 1.4e-7.
 
 Full published model (24 blocks x 1024, 20,480 bp), one sequence x 20 shuffles,
 float32:
@@ -228,6 +229,9 @@ float32:
 | TITAN X (Pascal) 12 GB | `deep_lift_shap(compile=True)` | 86 s | 7.7 GB |
 | TITAN Xp 12 GB | `deep_lift_shap` | 78 s | 6.5 GB |
 | TITAN Xp 12 GB | `deep_lift_shap(compile=True)` | 70 s | 7.7 GB |
+| RTX 3080 10 GB | `tangermeme.deep_lift_shap` | out of memory | |
+| RTX 3080 10 GB | `deep_lift_shap` | 40 s | 6.5 GB |
+| RTX 3080 10 GB | `deep_lift_shap(compile=True)` | 32 s | 5.9 GB |
 
 `examples/deepliftshap_region.py` attributes a genomic region and plots it;
 `examples/benchmark_deep_lift_shap.py` compares the two implementations at reduced

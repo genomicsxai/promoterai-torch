@@ -10,6 +10,12 @@ attributions' relative L2 difference.
 
 Engine "auto" is the default batch_size/ref_chunk planning. The engine's automatic
 out-of-memory retry is turned into a failure here, so each row is one setting.
+
+The sweep stops each method at its first out-of-memory error. On Windows/WSL2 the
+NVIDIA driver's sysmem fallback can let CUDA spill into host RAM instead of
+raising one, which makes the larger settings crawl and can exhaust host memory
+(crashing WSL). Pass e.g. --memory_fraction 0.9 there to cap PyTorch's allocator
+below physical VRAM and get a real out-of-memory error back.
 """
 import argparse, time, gc, warnings, torch
 from torch import nn
@@ -19,9 +25,14 @@ from promoterai_torch.architecture import PromoterAI
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--widths", default="64,128,256", help="comma-separated model_dim values")
+parser.add_argument("--memory_fraction", type=float, default=None,
+                    help="cap PyTorch's CUDA allocator at this fraction of total GPU memory (e.g. 0.9 on Windows/WSL2, "
+                         "where the driver can spill to host RAM instead of raising out-of-memory); default: no cap")
 cli = parser.parse_args()
 warnings.filterwarnings("error", message="out of memory")
 dev = torch.device("cuda:0")
+if cli.memory_fraction is not None:
+    torch.cuda.set_per_process_memory_fraction(cli.memory_fraction, dev)
 L, K = 20480, 20
 widths = [int(w) for w in cli.widths.split(",")]
 

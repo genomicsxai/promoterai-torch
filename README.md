@@ -218,6 +218,14 @@ and `torch.compile` on an RTX 3080 (compute capability 8.6) is ~21% faster once
 compiled (the first call adds ~12 s of compilation), agreeing with eager to a
 relative L2 of 1.4e-7.
 
+On Ampere and newer GPUs, PyTorch runs convolutions in TF32 by default
+(`torch.backends.cudnn.allow_tf32 = True`), so GPU attributions differ from
+tangermeme's by a relative L2 of ~1e-4 (2.7e-4 measured on an RTX 3080). This is
+floating-point noise, not an engine difference, and it matches the original
+TensorFlow model, which also uses TF32 on these GPUs. For an exact comparison, set
+`torch.backends.cudnn.allow_tf32 = False` first; the gap then drops to ~1e-7, at no
+cost in speed.
+
 Full published model (24 blocks x 1024, 20,480 bp), one sequence x 20 shuffles,
 float32:
 

@@ -124,7 +124,7 @@ def test_engine_batching_matches_one_at_a_time(batch_size, ref_chunk):
     assert d.shape == d_expected.shape == (5, 6) and float(d.max()) < 1e-12
 
 
-def test_plan():
+def test_plan(monkeypatch):
     cpu, f32, GiB = torch.device("cpu"), torch.float32, 1 << 30
     full = _model(num_blocks=24, model_dim=1024, output_crop=0).float()
     L, M = 20480, 20480 * 1024 * 4
@@ -141,10 +141,13 @@ def test_plan():
     assert engine._plan(narrow, 2048, 100, 20, f32, cpu, 10 * GiB) == (2, 20)
     assert engine._plan(narrow, 512, 100, 20, f32, cpu, 10 * GiB) == (7, 20)
     assert engine._plan(narrow, 512, 3, 20, f32, cpu, 10 * GiB) == (3, 20)
-    # Compiled passes budget more per step.
-    assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB, compile=True)[1] == 3 < (
-        engine._plan(narrow, L, 100, 20, f32, cpu, GiB)[1]
-    )
+    # torch.compile (here: CPU) is bounded by the eager model; only the TorchScript
+    # fallback on capability < 7.0 GPUs budgets more per step.
+    eager = engine._plan(narrow, L, 100, 20, f32, cpu, GiB)
+    assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB, compile=True) == eager
+    monkeypatch.setattr(engine, "_torchscript_fallback", lambda device: True)
+    assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB, compile=True)[1] == 3 < eager[1]
+    assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB) == eager
 
 
 def test_engine_retries_smaller_after_oom(monkeypatch):

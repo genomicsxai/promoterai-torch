@@ -215,9 +215,11 @@ def _available_memory(device: torch.device) -> int:
 
 # Activations, in units of one (L, C) tensor, that `_attribute` holds at its peak per
 # sequence (cached forward + pre-ReLU recompute) and per reference (forward, G and the
-# block backward's transients), and what compiling adds per step. Fitted to peak CUDA
-# memory on a TITAN X; see `_plan`.
-_PER_SEQ_EXTRA, _PER_REF_EXTRA, _COMPILE_EXTRA = 13, 16, 16
+# block backward's transients), and what compile=True adds per step on GPUs where it
+# falls back to TorchScript (`_torchscript_fallback`). Fitted to peak CUDA memory on a
+# TITAN X (eager, TorchScript) and checked on an RTX 3080 (eager, torch.compile); see
+# `_plan`.
+_PER_SEQ_EXTRA, _PER_REF_EXTRA, _TORCHSCRIPT_EXTRA = 13, 16, 16
 # Steps stop growing once a step's (L, C) layer has this many elements: beyond it the
 # GPU is saturated and larger steps only cost memory. Measured on a TITAN Xp, 32
 # sequences x 20 shuffles at 24 blocks: width 64 x L=20480, 1 reference a step (1.3M)
@@ -240,15 +242,19 @@ def _plan(model, L, n_seqs, n_refs, dtype, device, max_memory=None, compile=Fals
     (L, C) activations -- its cached forward (n_blocks + 2 incl. the stem's
     pre-ReLU), its pre-ReLU recompute (4C wide) and head projections; a reference
     ~(n_blocks + 16) -- its forward, G, its pre-ReLU recompute, the rescaled
-    gradient, the rule's temporaries and the FFN/conv transposes. Compiled passes
-    keep ~16 more per step (the fused rule isn't in place).
+    gradient, the rule's temporaries and the FFN/conv transposes. The TorchScript
+    fallback (`compile=True` on GPUs of capability < 7.0) keeps ~16 more per step
+    (the fused rule isn't in place). torch.compile (every other device) needs no
+    extra: it peaks ~4 activations below eager per sequence and per reference
+    (measured on an RTX 3080, widths 128 and 1024), so the eager model bounds it.
     """
     if max_memory is None:
         max_memory = int(0.85 * _available_memory(device))
     C = model.stem.out_channels
     M = L * C * torch.tensor([], dtype=dtype).element_size()
     nb = len(model.blocks)
-    per_seq = (nb + _PER_SEQ_EXTRA + (_COMPILE_EXTRA if compile else 0)) * M
+    extra = _TORCHSCRIPT_EXTRA if compile and _torchscript_fallback(device) else 0
+    per_seq = (nb + _PER_SEQ_EXTRA + extra) * M
     per_ref = (nb + _PER_REF_EXTRA) * M
     k_fit = int((max_memory - per_seq) // per_ref)
     if k_fit < 1:
@@ -287,6 +293,12 @@ def _shuffles(x, n, random_state):
     )
 
 
+def _torchscript_fallback(device: torch.device) -> bool:
+    """Whether compile=True falls back to TorchScript (CUDA capability < 7.0, where
+    torch.compile's Triton backend can't run) rather than using torch.compile."""
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) < (7, 0)
+
+
 def _passes(compile: bool, device: torch.device):
     """The forward, block-backward and rescale functions to run.
 
@@ -299,7 +311,7 @@ def _passes(compile: bool, device: torch.device):
     eager = {"rescale": _rescale_, "forward": _forward, "block_backward": _block_backward}
     if not compile:
         return eager
-    if device.type == "cuda" and torch.cuda.get_device_capability(device) < (7, 0):
+    if _torchscript_fallback(device):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # TorchScript's deprecation notice
             return {**eager, "rescale": torch.jit.script(_rescale)}

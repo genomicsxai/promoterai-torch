@@ -35,6 +35,81 @@ class PromoterAIWrapper(nn.Module):
         return out[0].mean(dim=1)   # (B, n_tracks)
 ```
 
+## DeepLIFT/SHAP engine (`src/promoterai_torch/attribution.py`)
+
+`tangermeme.deep_lift_shap` keeps the full autograd graph for 2 rows (sequence and
+reference) per pair: ~26 GB per row at the published 24 x 1024 x 20480 scale, so it
+needs an 80 GB card (~71 GB, ~92 s per sequence at 20 shuffles on an A100 with TF32)
+and runs out of memory on 12 GB ones. `attribution.deep_lift_shap` computes the same
+numbers (same references for a given `random_state`, same rescale rule and
+hypothetical projection) with a hand-written backward, after Cherimoya's engine:
+
+- **Rule in closed form.** PromoterAI's only nonlinearities are ReLUs, where
+  tangermeme applies the rescale rule (secant multiplier, plain gradient when
+  |a_x - a_r| < 1e-6). Everything else (eval BatchNorm, depthwise conv, linear,
+  residuals, the head's mean/crop) is linear, so its ordinary transpose is exact.
+- **Sequence half only.** tangermeme's rule for the sequence row reads the
+  reference row's activations, never its gradient, and every op is row-wise, so the
+  backward runs over the k pairs, not 2k rows. The sequence's forward is computed
+  once and cached across reference chunks.
+- **Recompute instead of store.** The forward keeps only block outputs (L x C per
+  row per block); the backward recomputes each block's pre-ReLU FFN activations
+  (L x 4C, the dominant tensor) when it gets there, and adds each output head's
+  contribution when it reaches that shortcut layer.
+
+Verified: float64 agreement to ~1e-16 with tangermeme at toy scale (`tests/test_attribution.py`,
+including given references, hypothetical attributions, track subsets, batching and
+the planner); on the real hg38 model at full scale, float32 agreement with
+tangermeme (run on CPU, 66 GB RSS) to 2.6e-7 relative L2, and convergence deltas
+~1e-7.
+
+Step sizing (`_plan`): a fitted memory model (~n_blocks + 13 (L, C) activations per
+sequence, ~n_blocks + 16 per reference, +16 per step for the TorchScript fallback), capped where the
+GPU saturates (2^26 elements in a step's (L, C) layer, i.e. 4 references at the
+published scale; measurements next to `_SATURATION`). The limit was 2^22 (1 reference
+at the published scale), fitted on Pascal, where 2 references per step were only 3%
+faster than 1 for +3 GiB. An A100 80GB keeps gaining up to 4: 34.9 / 32.9 / 32.0 /
+31.5 / 31.3 s for 1 / 2 / 4 / 10 / 20 references per step (eager, strict float32,
+real hg38 checkpoint, 20 shuffles), 6.8 / 5.9 / 5.8 / 5.9 s for 1 / 4 / 10 / 20
+compiled with TF32. Smaller cards are capped by the memory budget before the new
+limit (a 12 GB card gets 2, a 10 GB one 1), so they behave as before. Only once all of
+a sequence's references fit in one step are sequences batched; on a TITAN Xp this gave
+no measurable speedup down to L=2048 at width 64 (20 references already saturate), so
+it matters only for very short inputs. An out-of-memory step is retried at half size.
+`_chunks` never leaves a lone trailing reference (it borrows one from the previous
+chunk): compiled passes specialize size-1 dimensions, and on an A100 the 1 -> 2
+transition cost a 35-70 s recompile.
+
+**Compiling on Pascal.** `torch.compile`'s GPU backend is Triton, which needs compute
+capability >= 7.0, so it can't run on the TITAN X/Xp (sm_61). TorchScript's NNC fuser
+generates CUDA through NVRTC and does run there: `compile=True` on such a GPU scripts
+just the rescale rule, the bulk of the elementwise work (one (L, 4C) rule: 9 ms fused
+vs 23 ms functional / 27 ms in place eagerly on a TITAN Xp). The eager rule runs in
+place to save memory, which is slower on the GPU than the functional one; the fused
+one is both faster and holds fewer temporaries than the functional one. End to end
+at the published scale (20 shuffles) that is 1.12x on both cards: TITAN Xp 78 -> 70 s,
+TITAN X 96 -> 86 s, for +1.2 GiB (the fused rule isn't in place). On CPU and
+newer GPUs, `compile=True` uses torch.compile with a raised recompile limit (block
+backward recompiles once per distinct dilation); on 16 CPU threads at 24 blocks x
+L=4096 it was 86 -> 58 s at width 256 but slower at width 64 (10 -> 13 s), after
+~45 s of compilation. On GPUs (Triton): RTX 3080 40 -> 32 s (after ~12 s of
+compilation); A100 80GB, 4 references per step, 32.0 -> 28.2 s with strict float32
+(~70 s first call) and 9.9 -> 5.9 s with TF32 (~33 s first call), agreeing with eager
+to ~1e-7. torch.compile fails on these passes in torch 2.1, 2.4 and 2.5 (dynamo
+internal errors) and works from 2.6, so `_passes` refuses `compile=True` below 2.6;
+eager mode runs on 2.1 (the recompile-limit config names are looked up rather than
+assumed, and `torch.cuda.OutOfMemoryError` stands in for `torch.OutOfMemoryError`).
+
+**TF32 and the tangermeme comparison.** On an A100 at the published scale (random
+weights, 1 sequence x 20 shuffles), the engine and tangermeme differ by 3e-4 relative
+L2 under PyTorch's defaults but 1.7e-6 with `torch.backends.cudnn.allow_tf32 = False`:
+the default cuDNN TF32 convolutions alone move tangermeme 2.8e-4 and the engine 9.8e-5
+from strict float32. With matmul TF32 on as well, both are ~3x faster (tangermeme 44
+-> 14 s, engine 30 -> 9.5 s) and ~3e-3 from strict float32 (1.6-1.8e-4 on the real hg38
+checkpoint, with convergence deltas ~1.5e-3 instead of ~2e-6). Compare implementations
+with TF32 off. The ~92 s / ~71 GB once quoted for tangermeme on an A100 didn't
+reproduce: it measures 44 s / 65.5 GiB strict and 14 s with TF32.
+
 ## Dependency layout
 
 - Core (`pip install promoterai-torch`): `torch`, `numpy`, `pandas`, `pyfaidx`, `tqdm` — no TensorFlow

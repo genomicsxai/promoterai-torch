@@ -184,3 +184,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Local model checkpoints (licensed; never commit) and Windows download metadata
+models/
+*:Zone.Identifier

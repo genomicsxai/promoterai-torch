@@ -108,3 +108,59 @@ memory, and then PyTorch runs. Pass `--interleaved` only for small debugging
 runs where both runtimes fit in GPU memory.
 
 Errors are ~1e-7 (<1e-4) when run at FP32, i.e., within machine precision, when comparing all four official TF/Keras SavedModels (`hg38`, `hg38_mm10`, `hg38_finetune`, and `hg38_mm10_finetune`) against their PyTorch checkpoints.
+
+## DeepLIFT/SHAP attributions vs tangermeme
+
+`promoterai_torch.attribution.deep_lift_shap` replaces autograd with a backward
+written by hand for PromoterAI, so it is checked against
+[`tangermeme`](https://github.com/jmschrei/tangermeme)'s `deep_lift_shap` on the
+same quantity: the mean prediction of one head over its output window and the
+chosen tracks. Both use the same dinucleotide-shuffled references for a given
+`random_state`.
+
+- **Toy scale, float64** (`tests/test_attribution.py`, CPU): agreement to ~1e-16
+  across output crops, both species heads, the published depth (24 blocks,
+  dilations up to 1024), given references, hypothetical attributions, track subsets,
+  batching and reference chunking. The convergence deltas
+  (`|sum(attributions) - (y(x) - y(ref))|`) are below 1e-12.
+- **Real `hg38` model, float32, CPU:** 2.6e-7 relative L2 against tangermeme,
+  with convergence deltas around 1e-7.
+- **Published scale on an A100 80GB** (24 blocks x 1024, 20,480 bp, random weights,
+  1 sequence x 20 shuffles), relative L2 between the two implementations:
+
+  | Precision flags | Engine vs tangermeme |
+  | --- | --- |
+  | `cudnn.allow_tf32 = False`, `matmul.allow_tf32 = False` (strict float32) | 1.7e-6 |
+  | PyTorch default (`cudnn.allow_tf32 = True`) | 3.0e-4 |
+  | Both `True` | 1.2e-3 |
+
+  The gap under the default flags is floating-point noise from TF32
+  convolutions, not a difference between the implementations. Against strict
+  float32, the default moves tangermeme by 2.8e-4 and the engine by 9.8e-5.
+  Enabling matmul TF32 as well moves both by ~3e-3 on random weights and ~2e-4 on
+  the real `hg38_finetune` checkpoint, where convergence deltas grow from ~2e-6 to
+  ~1.5e-3. Set both flags to `False` before comparing implementations:
+
+  ```python
+  import torch
+  torch.backends.cudnn.allow_tf32 = False
+  torch.backends.cuda.matmul.allow_tf32 = False
+  ```
+
+`compile=True` agrees with eager to ~1e-7 (RTX 3080 and A100, real checkpoint).
+To rerun the comparisons:
+
+```sh
+uv run --group dev --extra interpret pytest tests/test_attribution.py -v
+
+# Engine vs tangermeme at reduced and published width (GPU; width 1024 needs ~66 GB
+# for tangermeme)
+uv run --extra interpret python examples/benchmark_deep_lift_shap.py --widths 64,256,1024
+
+# Eager vs compile=True on a real checkpoint
+uv run --extra interpret python examples/benchmark_deep_lift_shap_compile.py \
+    --checkpoint models/promoterAI_v1_hg38_finetune.pt --fasta hg38.fa
+```
+
+`examples/benchmark_deep_lift_shap.py` runs with PyTorch's default precision flags;
+set the flags above at the top of the script for a strict-float32 comparison.

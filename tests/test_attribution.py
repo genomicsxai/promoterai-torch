@@ -104,11 +104,16 @@ def test_engine_tracks_subset():
         expected = _tm(model, X, tracks=tracks, n_shuffles=4, random_state=3)
         got = deep_lift_shap(model, X, tracks=tracks, n_shuffles=4, random_state=3)
         torch.testing.assert_close(got, expected, rtol=1e-10, atol=1e-14)
-    with pytest.raises(ValueError, match="tracks"):
-        deep_lift_shap(model, X, tracks=[5], n_shuffles=2)
+    torch.testing.assert_close(
+        deep_lift_shap(model, X, tracks=[-1, 0], n_shuffles=2, random_state=0),
+        deep_lift_shap(model, X, tracks=[4, 0], n_shuffles=2, random_state=0),
+    )
+    for bad in ([5], [-6], [4, -1], []):  # out of range, aliased duplicate, empty
+        with pytest.raises(ValueError, match="tracks"):
+            deep_lift_shap(model, X, tracks=bad, n_shuffles=2)
 
 
-@pytest.mark.parametrize("batch_size, ref_chunk", [(2, None), (2, 4), (3, 6), (None, None)])
+@pytest.mark.parametrize("batch_size, ref_chunk", [(2, None), (2, 4), (3, 6), (1, 5), (None, None)])
 def test_engine_batching_matches_one_at_a_time(batch_size, ref_chunk):
     """Several sequences per step, and reference chunks that don't divide n_shuffles."""
     model = _model()
@@ -128,18 +133,19 @@ def test_plan(monkeypatch):
     cpu, f32, GiB = torch.device("cpu"), torch.float32, 1 << 30
     full = _model(num_blocks=24, model_dim=1024, output_crop=0).float()
     L, M = 20480, 20480 * 1024 * 4
-    # Published scale: one reference already saturates; 2 would fit in 10 GiB.
-    assert engine._plan(full, L, 10, 20, f32, cpu, 10 * GiB) == (1, 1)
+    # Published scale: 4 references a step saturate (an A100 80GB gets 4)...
+    assert engine._plan(full, L, 10, 20, f32, cpu, 80 * GiB) == (1, 4)
+    # ... a 12 GB card only fits 2 in its budget.
+    assert engine._plan(full, L, 10, 20, f32, cpu, 10 * GiB) == (1, 2)
     with pytest.warns(UserWarning, match="budget"):
         assert engine._plan(full, L, 1, 20, f32, cpu, M) == (1, 1)
-    # Narrow model: references per step up to saturation...
+    # Narrow model: references per step up to the memory budget...
     narrow = _model(num_blocks=24, model_dim=64, output_crop=0).float()
-    assert engine._plan(narrow, L, 100, 20, f32, cpu, 10 * GiB) == (1, 4)
-    # ... or to the memory budget, whichever is smaller.
+    assert engine._plan(narrow, L, 100, 20, f32, cpu, 2 * GiB) == (1, 9)
     assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB // 2)[1] == 1
-    # Short sequences: all references fit, so sequences are batched to saturation.
-    assert engine._plan(narrow, 2048, 100, 20, f32, cpu, 10 * GiB) == (2, 20)
-    assert engine._plan(narrow, 512, 100, 20, f32, cpu, 10 * GiB) == (7, 20)
+    # ... and once all of them fit, sequences are batched to saturation or the budget.
+    assert engine._plan(narrow, L, 100, 20, f32, cpu, 10 * GiB) == (2, 20)
+    assert engine._plan(narrow, 2048, 100, 20, f32, cpu, 10 * GiB) == (24, 20)
     assert engine._plan(narrow, 512, 3, 20, f32, cpu, 10 * GiB) == (3, 20)
     # torch.compile (here: CPU) is bounded by the eager model; only the TorchScript
     # fallback on capability < 7.0 GPUs budgets more per step.
@@ -148,6 +154,21 @@ def test_plan(monkeypatch):
     monkeypatch.setattr(engine, "_torchscript_fallback", lambda device: True)
     assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB, compile=True)[1] == 3 < eager[1]
     assert engine._plan(narrow, L, 100, 20, f32, cpu, GiB) == eager
+
+
+@pytest.mark.parametrize(
+    "K, k, expected",
+    [
+        (20, 4, [(0, 4), (4, 8), (8, 12), (12, 16), (16, 20)]),
+        (21, 4, [(0, 4), (4, 8), (8, 12), (12, 16), (16, 19), (19, 21)]),  # no lone reference
+        (5, 2, [(0, 2), (2, 5)]),
+        (6, 4, [(0, 4), (4, 6)]),
+        (3, 1, [(0, 1), (1, 2), (2, 3)]),
+        (1, 4, [(0, 1)]),
+    ],
+)
+def test_chunks(K, k, expected):
+    assert engine._chunks(K, k) == expected
 
 
 def test_engine_retries_smaller_after_oom(monkeypatch):

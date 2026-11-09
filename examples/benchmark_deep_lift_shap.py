@@ -68,7 +68,6 @@ for C in widths:
         a, t, mem = run(lambda: engine_dls(model, X, n_shuffles=K, random_state=0, ref_chunk=rc, device=dev))
         print(f"  C={C:4d} engine    ref_chunk={rc or 'auto':>4}: " + ("OOM" if t is None else f"{t:6.1f} s  peak {mem:5.2f} GiB"), flush=True)
         if t is not None and (best_en is None or t < best_en[1]): best_en = (a, t, mem, rc)
-        if t is None and rc is not None: continue
     if best_tm and best_en:
         rel = float((best_en[0] - best_tm[0]).norm() / best_tm[0].norm())
         print(f"  C={C:4d} SUMMARY best tangermeme {best_tm[1]:.1f} s (bs={best_tm[3]}, {best_tm[2]:.2f} GiB) vs engine {best_en[1]:.1f} s "

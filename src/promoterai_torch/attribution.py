@@ -40,6 +40,8 @@ sequence/reference pair fits a 12 GB GPU):
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import os
 import warnings
 
@@ -49,6 +51,9 @@ import torch.nn.functional as F
 from promoterai_torch.architecture import MetaFormerBlock, PromoterAI
 
 _RESCALE_EPS = 1e-6  # tangermeme's threshold for falling back to the plain gradient
+# torch.OutOfMemoryError is torch >= 2.5; torch.cuda.OutOfMemoryError (the same class
+# there) goes back to 1.13.
+_OOM = getattr(torch, "OutOfMemoryError", torch.cuda.OutOfMemoryError)
 
 
 # --------------------------------------------------------------------------- rules
@@ -135,7 +140,7 @@ def _head_weights(model, head, tracks, L, dtype, device):
     lo, hi = crop, L - crop
     D = out_head.projections[0].out_features
     idx = torch.arange(D) if tracks is None else torch.as_tensor(tracks, dtype=torch.long).flatten()
-    if len(idx) == 0 or len(torch.unique(idx)) != len(idx) or int(idx.min()) < -D or int(idx.max()) >= D:
+    if len(idx) == 0 or int(idx.min()) < -D or int(idx.max()) >= D or len(torch.unique(idx % D)) != len(idx):
         raise ValueError(f"tracks must be distinct indices into head {head}'s {D} tracks")
     w = torch.zeros(D, dtype=dtype)
     w[idx] = 1.0 / (len(out_head.projections) * (hi - lo) * len(idx))
@@ -180,6 +185,21 @@ def _step(model, head, lo, hi, w, z_x, layers_x, refs, fns):
     return G @ model.stem.weight[:, :, 0], y_r  # stem is a kernel-1 conv
 
 
+def _chunks(K: int, k: int):
+    """[start, end) reference chunks of size k, except that no chunk has a single
+    reference unless k == 1: torch.compile (dynamic=True) specializes size-1 dimensions,
+    so a trailing 1-reference chunk would trigger a full recompile (~35-70 s at the
+    published scale on an A100). A remainder of 1 is folded into the previous chunk
+    (k + 1 references) when k == 2, otherwise borrowed from it (k - 1 and 2)."""
+    bounds = list(range(0, K, k)) + [K]
+    if k > 1 and len(bounds) > 2 and K % k == 1:
+        if k == 2:
+            del bounds[-2]
+        else:
+            bounds[-2] -= 1
+    return list(itertools.pairwise(bounds))
+
+
 def _attribute(model, head, lo, hi, w, x_rows, r_rows, k, fns):
     """Summed hypothetical attributions (B, L, 4) and deltas (B, K) for sequences
     x_rows (B, L, 4) and their references r_rows (B, K, L, 4), k references a step."""
@@ -188,14 +208,14 @@ def _attribute(model, head, lo, hi, w, x_rows, r_rows, k, fns):
     y_x = _output(model, head, layers_x, lo, hi, w)  # (B,)
     hyp_sum = torch.zeros_like(x_rows)
     deltas = torch.empty(x_rows.shape[0], K, dtype=x_rows.dtype, device=x_rows.device)
-    for s in range(0, K, k):
-        r = r_rows[:, s : s + k]
+    for s, e in _chunks(K, k):
+        r = r_rows[:, s:e]
         m, y_r = _step(model, head, lo, hi, w, z_x, layers_x, r, fns)  # (B, k, L, 4)
         # tangermeme's hypothetical attributions: the multipliers projected onto each
         # base's difference from the reference, m_i - sum_c r_c m_c.
         hyp_sum += (m - (r * m).sum(-1, keepdim=True)).sum(1)
         lin = ((x_rows.unsqueeze(1) - r) * m).sum(dim=(2, 3))
-        deltas[:, s : s + k] = ((y_x[:, None] - y_r) - lin).abs()
+        deltas[:, s:e] = ((y_x[:, None] - y_r) - lin).abs()
     return hyp_sum, deltas
 
 
@@ -221,12 +241,16 @@ def _available_memory(device: torch.device) -> int:
 # `_plan`.
 _PER_SEQ_EXTRA, _PER_REF_EXTRA, _TORCHSCRIPT_EXTRA = 13, 16, 16
 # Steps stop growing once a step's (L, C) layer has this many elements: beyond it the
-# GPU is saturated and larger steps only cost memory. Measured on a TITAN Xp, 32
-# sequences x 20 shuffles at 24 blocks: width 64 x L=20480, 1 reference a step (1.3M)
-# 84 s, 13 or 20 a step 69/68 s; width 64 x L=2048, 20 a step (2.6M) 6.6 s with 1 or
-# 7 sequences a step; at the published scale 2 references a step (42M) vs 1 is 3%
-# faster on a TITAN X.
-_SATURATION = 1 << 22
+# GPU is saturated and larger steps only cost memory (below it, the memory budget caps
+# steps first on small cards). 2^26 is 4 references a step at the published scale
+# (21M elements each). A100 80GB, 1 sequence x 20 shuffles, real hg38 checkpoint:
+# 1 / 2 / 4 / 10 / 20 references a step took 34.9 / 32.9 / 32.0 / 31.5 / 31.3 s eagerly
+# (TF32 off) and 6.8 / - / 5.9 / 5.8 / 5.9 s compiled with TF32, for 6.5 / 9.5 / 15.6 /
+# 33.9 / 64.4 GiB; at widths 64 and 256 (random weights) 20 a step was fastest. On
+# Pascal: TITAN Xp, 32 sequences x 20 shuffles at width 64 x L=20480, 1 reference a
+# step 84 s, 13 or 20 a step 69/68 s; width 64 x L=2048, 20 a step 6.6 s with 1 or 7
+# sequences a step; at the published scale 2 a step vs 1 is 3% faster on a TITAN X.
+_SATURATION = 1 << 26
 
 
 def _plan(model, L, n_seqs, n_refs, dtype, device, max_memory=None, compile=False):
@@ -299,6 +323,10 @@ def _torchscript_fallback(device: torch.device) -> bool:
     return device.type == "cuda" and torch.cuda.get_device_capability(device) < (7, 0)
 
 
+def _torch_version() -> tuple[int, int]:
+    return tuple(int(v) for v in torch.__version__.split("+")[0].split(".")[:2])
+
+
 def _passes(compile: bool, device: torch.device):
     """The forward, block-backward and rescale functions to run.
 
@@ -315,11 +343,33 @@ def _passes(compile: bool, device: torch.device):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # TorchScript's deprecation notice
             return {**eager, "rescale": torch.jit.script(_rescale)}
+    if _torch_version() < (2, 6):
+        raise RuntimeError(
+            f"compile=True needs torch >= 2.6 (torch.compile fails on these passes in 2.1-2.5); "
+            f"this is torch {torch.__version__}. Upgrade torch or use compile=False."
+        )
     return {
         "rescale": torch.compile(_rescale, dynamic=True),
         "forward": torch.compile(_forward, dynamic=True),
         "block_backward": torch.compile(_block_backward, dynamic=True),
     }
+
+
+def _recompile_limits(compile: bool):
+    """Raise torch.compile's recompile limits (the block backward recompiles once per
+    distinct dilation). Newer torch calls them recompile_limit / accumulated_recompile_limit,
+    older torch cache_size_limit / accumulated_cache_size_limit (the latter absent in the
+    oldest releases), so patch whichever exist."""
+    if not compile:
+        return contextlib.nullcontext()
+    cfg = torch._dynamo.config
+    limits = {}
+    for names, value in ((("recompile_limit", "cache_size_limit"), 64),
+                         (("accumulated_recompile_limit", "accumulated_cache_size_limit"), 4096)):
+        name = next((n for n in names if hasattr(cfg, n)), None)
+        if name is not None:
+            limits[name] = value
+    return cfg.patch(**limits)
 
 
 @torch.no_grad()
@@ -367,8 +417,9 @@ def deep_lift_shap(
     batch_size, ref_chunk : int, optional
         Sequences per step and references per sequence per step. Default: what
         fits in ``max_memory``; a step that runs out of memory is retried at half
-        the size. Larger steps are faster for small models / short sequences; at the
-        published scale one reference per step already saturates the GPU.
+        the size. Steps grow until the GPU saturates: at the published scale that is
+        up to 4 references a step (~16 GiB; ~10% faster than 1 on an A100), less on
+        smaller cards, where the budget caps it.
     max_memory : int, optional
         Byte budget for ``batch_size`` / ``ref_chunk``; default 85% of the device's
         free memory.
@@ -383,6 +434,14 @@ def deep_lift_shap(
         Fuse the elementwise work: torch.compile on CPU and CUDA capability >= 7.0
         (first call compiles for up to a minute), TorchScript's fuser for the
         rescale rule on older GPUs such as Pascal, where Triton can't run.
+        torch.compile needs torch >= 2.6 (eager mode works from 2.1). A step
+        whose batch or reference chunk has size 1 compiles separately from larger
+        ones (the chunks avoid a lone trailing reference for this reason).
+
+    Precision follows PyTorch's TF32 flags. On Ampere and newer GPUs,
+    ``torch.backends.cuda.matmul.allow_tf32 = True`` (off by default) is ~3x faster at
+    the published scale (A100: 34.9 -> 11.1 s eager, 5.9 s compiled), at ~2e-4 relative
+    L2 from strict float32 and convergence deltas ~1e-3 instead of ~1e-6.
     device : optional
         Defaults to the model's device.
 
@@ -414,7 +473,7 @@ def deep_lift_shap(
     B = batch_size or (plan_B if k == K else 1)
     lo, hi, w = _head_weights(model, head, tracks, L, dtype, device)
     fns = _passes(compile, device)
-    with torch._dynamo.config.patch(recompile_limit=64, accumulated_recompile_limit=4096):
+    with _recompile_limits(compile):
         return _run(model, X, head, lo, hi, w, references, K, random_state, B, k, fns, device, dtype,
                     hypothetical, return_deltas)
 
@@ -438,11 +497,11 @@ def _run(model, X, head, lo, hi, w, references, K, random_state, B, k, fns, devi
         oom = False
         try:
             hyp_sum, d = _attribute(model, head, lo, hi, w, x_rows, r_rows, k, fns)
-        except torch.OutOfMemoryError:
+        except _OOM:
             oom = True  # retry outside the handler, once the traceback's tensors are freed
         if oom:
             if b == 1 and k == 1:
-                raise torch.OutOfMemoryError(
+                raise _OOM(
                     "out of memory at batch_size=1, ref_chunk=1; use a smaller model, a "
                     "shorter sequence or a larger device"
                 )

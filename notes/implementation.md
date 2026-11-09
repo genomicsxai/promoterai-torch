@@ -64,13 +64,21 @@ tangermeme (run on CPU, 66 GB RSS) to 2.6e-7 relative L2, and convergence deltas
 ~1e-7.
 
 Step sizing (`_plan`): a fitted memory model (~n_blocks + 13 (L, C) activations per
-sequence, ~n_blocks + 16 per reference, +16 per step when compiled), capped where the
-GPU saturates (2^22 elements in a step's (L, C) layer; measurements next to
-`_SATURATION`). Bigger steps past that only cost memory: at width 1024, 2 references
-per step is 3% faster than 1 for +3 GiB. Only once all of a sequence's references fit
-in one step are sequences batched; on a TITAN Xp this gave no measurable speedup down
-to L=2048 at width 64 (20 references already saturate), so it matters only for very
-short inputs. An out-of-memory step is retried at half size.
+sequence, ~n_blocks + 16 per reference, +16 per step for the TorchScript fallback), capped where the
+GPU saturates (2^26 elements in a step's (L, C) layer, i.e. 4 references at the
+published scale; measurements next to `_SATURATION`). The limit was 2^22 (1 reference
+at the published scale), fitted on Pascal, where 2 references per step were only 3%
+faster than 1 for +3 GiB. An A100 80GB keeps gaining up to 4: 34.9 / 32.9 / 32.0 /
+31.5 / 31.3 s for 1 / 2 / 4 / 10 / 20 references per step (eager, strict float32,
+real hg38 checkpoint, 20 shuffles), 6.8 / 5.9 / 5.8 / 5.9 s for 1 / 4 / 10 / 20
+compiled with TF32. Smaller cards are capped by the memory budget before the new
+limit (a 12 GB card gets 2, a 10 GB one 1), so they behave as before. Only once all of
+a sequence's references fit in one step are sequences batched; on a TITAN Xp this gave
+no measurable speedup down to L=2048 at width 64 (20 references already saturate), so
+it matters only for very short inputs. An out-of-memory step is retried at half size.
+`_chunks` never leaves a lone trailing reference (it borrows one from the previous
+chunk): compiled passes specialize size-1 dimensions, and on an A100 the 1 -> 2
+transition cost a 35-70 s recompile.
 
 **Compiling on Pascal.** `torch.compile`'s GPU backend is Triton, which needs compute
 capability >= 7.0, so it can't run on the TITAN X/Xp (sm_61). TorchScript's NNC fuser
@@ -84,8 +92,23 @@ TITAN X 96 -> 86 s, for +1.2 GiB (the fused rule isn't in place). On CPU and
 newer GPUs, `compile=True` uses torch.compile with a raised recompile limit (block
 backward recompiles once per distinct dilation); on 16 CPU threads at 24 blocks x
 L=4096 it was 86 -> 58 s at width 256 but slower at width 64 (10 -> 13 s), after
-~45 s of compilation. The torch.compile *GPU* path (Triton, capability >= 7.0) has not
-been run yet -- no such GPU on the dev box; benchmark it before recommending it.
+~45 s of compilation. On GPUs (Triton): RTX 3080 40 -> 32 s (after ~12 s of
+compilation); A100 80GB, 4 references per step, 32.0 -> 28.2 s with strict float32
+(~70 s first call) and 9.9 -> 5.9 s with TF32 (~33 s first call), agreeing with eager
+to ~1e-7. torch.compile fails on these passes in torch 2.1, 2.4 and 2.5 (dynamo
+internal errors) and works from 2.6, so `_passes` refuses `compile=True` below 2.6;
+eager mode runs on 2.1 (the recompile-limit config names are looked up rather than
+assumed, and `torch.cuda.OutOfMemoryError` stands in for `torch.OutOfMemoryError`).
+
+**TF32 and the tangermeme comparison.** On an A100 at the published scale (random
+weights, 1 sequence x 20 shuffles), the engine and tangermeme differ by 3e-4 relative
+L2 under PyTorch's defaults but 1.7e-6 with `torch.backends.cudnn.allow_tf32 = False`:
+the default cuDNN TF32 convolutions alone move tangermeme 2.8e-4 and the engine 9.8e-5
+from strict float32. With matmul TF32 on as well, both are ~3x faster (tangermeme 44
+-> 14 s, engine 30 -> 9.5 s) and ~3e-3 from strict float32 (1.6-1.8e-4 on the real hg38
+checkpoint, with convergence deltas ~1.5e-3 instead of ~2e-6). Compare implementations
+with TF32 off. The ~92 s / ~71 GB once quoted for tangermeme on an A100 didn't
+reproduce: it measures 44 s / 65.5 GiB strict and 14 s with TF32.
 
 ## Dependency layout
 

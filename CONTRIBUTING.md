@@ -12,7 +12,7 @@ uv run pytest tests/ -v
 
 On a GPU older than Turing (compute capability < 7.5, e.g. Pascal), or on a
 CPU-only machine, add one PyTorch build group -- `cu126`, `cu130` or `cpu` --
-to every `uv sync`/`uv run` (see "Choosing a PyTorch build" in the README):
+to every `uv sync`/`uv run` (see [docs/installation.md](docs/installation.md)):
 
 ```sh
 uv sync --group dev --group cu126

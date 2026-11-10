@@ -34,6 +34,49 @@ attributions, deltas = deep_lift_shap(
 # (hypothetical=True returns every base's attribution instead)
 ```
 
+## Choosing a head
+
+Multi-species checkpoints (`hg38_mm10`) have one output head per species, and
+`head=` picks the one to attribute. Heads follow the checkpoint's `species_order`,
+which records the real order rather than assuming human comes first, so look the
+index up instead of hard-coding it:
+
+```python
+mouse = args["species_order"].index("mouse")   # ['human', 'mouse'] for hg38_mm10
+attributions = deep_lift_shap(model, X, head=mouse, n_shuffles=20, random_state=0)
+```
+
+`examples/deepliftshap_region.py --species mouse` does the same lookup.
+
+## Custom targets
+
+By default the attributed quantity is the head's mean prediction over its output
+window and the selected `tracks`. `target_weights=` attributes any weighted sum of
+the prediction instead: `(prediction * target_weights).sum()`, with
+`target_weights` broadcastable to `(output_length, n_tracks)` (4096 × 498 for the
+published human head). It's exact under the same rescale rule, and matches
+tangermeme on a wrapper that computes the same sum.
+
+```python
+L_out, D = 4096, 498
+
+# Mean over a +-250 bp window around the TSS (the output window's center), all tracks
+w = torch.zeros(L_out, 1)
+w[L_out // 2 - 250 : L_out // 2 + 250] = 1 / (500 * D)
+
+# Per-track weights, e.g. a signed contrast between two tracks
+w = torch.zeros(D)
+w[track_a], w[track_b] = 1.0, -1.0   # indices into the head's track list
+
+attributions = deep_lift_shap(model, X, target_weights=w, n_shuffles=20, random_state=0)
+```
+
+A `(n_tracks,)` tensor weights tracks, `(output_length, 1)` weights positions, and a
+full `(output_length, n_tracks)` tensor weights both. Normalization is up to you:
+weights summing to 1 give a mean, and unnormalized weights give a sum, which also
+scales the convergence deltas. `target_weights` and `tracks` are exclusive.
+Non-linear aggregations (max, log, ratios) aren't supported.
+
 ## Memory, batching and `compile=True`
 
 How many references (and, for very short sequences, how many sequences) go through

@@ -6,13 +6,14 @@ Usage:
         --model_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \\
         [--fasta examples/data/hg38.fa] \\
         [--chrom chr12] [--start 131710989] [--end 131711189] \\
-        [--n_shuffles 20] [--tracks 0 5 7] [--compile] [--device cpu] \\
+        [--n_shuffles 20] [--species mouse] [--tracks 0 5 7] [--compile] [--device cpu] \\
         [--output examples/img/deepliftshap.png]
 
 The script extracts a full-length input window centered on the specified region,
 runs DeepLIFT/SHAP (promoterai_torch.attribution.deep_lift_shap) on the mean
-prediction of the first head over its output window and the chosen tracks (default
-all), and produces a two-panel figure:
+prediction of one species head (default the first; --species picks one by name from
+the checkpoint's species_order) over its output window and the chosen tracks
+(default all), and produces a two-panel figure:
   - Top: per-position contribution sum across the full input window
   - Bottom: sequence logo (contribution × one-hot) zoomed to the region of interest
 """
@@ -30,6 +31,21 @@ from tangermeme.plot import plot_logo
 from promoterai_torch.attribution import deep_lift_shap
 from promoterai_torch.dataset import onehot_encode
 from promoterai_torch.utils import load_pretrained
+
+
+def species_head(ckpt_args: dict, species: str | None) -> int:
+    """Output-head index for a species name, from the checkpoint's species_order."""
+    if species is None:
+        return 0
+    order = ckpt_args.get("species_order")
+    if not order:
+        raise ValueError(
+            "this checkpoint doesn't record species_order (convert it with a current "
+            "promoterai-torch convert), so --species can't be resolved"
+        )
+    if species not in order:
+        raise ValueError(f"--species {species!r} not in the checkpoint's species_order {order}")
+    return order.index(species)
 
 
 def main():
@@ -59,7 +75,14 @@ def main():
     parser.add_argument("--n_shuffles", type=int, default=20)
     parser.add_argument("--random_state", type=int, default=0)
     parser.add_argument(
-        "--tracks", type=int, nargs="+", default=None, help="track indices to attribute (default all)"
+        "--species",
+        default=None,
+        help="species head to attribute, by name from the checkpoint's species_order "
+        "(e.g. human, mouse; default: the first head)",
+    )
+    parser.add_argument(
+        "--tracks", type=int, nargs="+", default=None,
+        help="track indices into that head to attribute (default all)",
     )
     parser.add_argument(
         "--compile", action="store_true", help="fuse elementwise work (torch.compile / TorchScript)"
@@ -90,15 +113,17 @@ def main():
     x = torch.from_numpy(onehot_encode(seq)).float().T.unsqueeze(0)  # (1, 4, L)
 
     # ── Load model and move to device ─────────────────────────────────────────
-    model, _ = load_pretrained(args.model_checkpoint)
+    model, ckpt_args = load_pretrained(args.model_checkpoint)
     model = model.to(args.device)
     model.eval()
+    head = species_head(ckpt_args, args.species)
 
     # ── Run DeepLIFT/SHAP, capturing convergence deltas ──────────────────────
     print(f"Running DeepLIFT/SHAP ({args.n_shuffles} shuffles) on {args.device}…")
     attrs, deltas = deep_lift_shap(
         model,
         x,
+        head=head,
         tracks=args.tracks,
         n_shuffles=args.n_shuffles,
         random_state=args.random_state,

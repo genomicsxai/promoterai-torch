@@ -27,6 +27,18 @@ class _Wrapper(nn.Module):
         return out.mean(dim=(1, 2)).unsqueeze(1)
 
 
+class _WeightedWrapper(nn.Module):
+    """A target_weights-weighted sum of one head's output, as tangermeme would attribute it."""
+
+    def __init__(self, model, weights, head=0):
+        super().__init__()
+        self.model, self.head, self.weights = model, head, weights
+
+    def forward(self, x):
+        out = self.model(x.transpose(1, 2))[self.head]  # (B, output_length, n_tracks)
+        return (out * self.weights).sum(dim=(1, 2)).unsqueeze(1)
+
+
 def _model(num_blocks=8, model_dim=8, output_crop=64, seed=0):
     torch.manual_seed(seed)
     model = PromoterAI(
@@ -198,6 +210,11 @@ def test_engine_compiled_matches_eager():
     eager = deep_lift_shap(model, X, n_shuffles=3, random_state=0, ref_chunk=2)
     compiled = deep_lift_shap(model, X, n_shuffles=3, random_state=0, ref_chunk=2, compile=True)
     torch.testing.assert_close(compiled, eager, rtol=1e-9, atol=1e-13)
+    # Full (output_length, n_tracks) target weights through the compiled passes.
+    w = torch.randn(192, 5, generator=torch.Generator().manual_seed(0), dtype=torch.float64)
+    eager = deep_lift_shap(model, X, target_weights=w, n_shuffles=3, random_state=0, ref_chunk=2)
+    compiled = deep_lift_shap(model, X, target_weights=w, n_shuffles=3, random_state=0, ref_chunk=2, compile=True)
+    torch.testing.assert_close(compiled, eager, rtol=1e-9, atol=1e-13)
 
 
 def test_rescale_variants_agree():
@@ -227,3 +244,50 @@ def test_input_validation():
         deep_lift_shap(model, _X(2, 256), references=_X(3, 256).unsqueeze(0))
     with pytest.raises(TypeError, match="PromoterAI"):
         deep_lift_shap(_Wrapper(model), _X(1, 256))
+
+
+@pytest.mark.parametrize("head", [0, 1])
+@pytest.mark.parametrize("kind", ["tracks", "window", "full"])
+def test_engine_target_weights(head, kind):
+    model = _model()  # L=256, output_crop=64: output_length 192; heads have 5 and 3 tracks
+    X = _X(2, 256)
+    Lout, D = 192, model.output_heads[head].projections[0].out_features
+    g = torch.Generator().manual_seed(7)
+    weights = {
+        "tracks": torch.randn(D, generator=g, dtype=torch.float64),  # signed: a track contrast
+        "window": torch.zeros(Lout, 1, dtype=torch.float64).index_fill_(0, torch.arange(80, 112), 1.0),
+        "full": torch.randn(Lout, D, generator=g, dtype=torch.float64),
+    }[kind]
+    expected = tm_deep_lift_shap(
+        _WeightedWrapper(model, weights, head), X, n_shuffles=4, random_state=1,
+        device="cpu", dtype=torch.float64, warning_threshold=1e9,
+    )
+    got, deltas = deep_lift_shap(
+        model, X, head=head, target_weights=weights, n_shuffles=4, random_state=1,
+        ref_chunk=2, return_deltas=True,
+    )
+    torch.testing.assert_close(got, expected, rtol=1e-10, atol=1e-14)
+    assert float(deltas.max()) < 1e-12
+
+
+def test_engine_target_weights_reproduce_tracks():
+    model = _model()
+    X = _X(1, 256)
+    weights = torch.zeros(5, dtype=torch.float64)
+    weights[[0, 3]] = 1.0 / (192 * 2)  # the mean over tracks 0 and 3
+    torch.testing.assert_close(
+        deep_lift_shap(model, X, target_weights=weights, n_shuffles=3, random_state=0),
+        deep_lift_shap(model, X, tracks=[0, 3], n_shuffles=3, random_state=0),
+    )
+
+
+def test_engine_target_weights_errors():
+    model = _model()
+    X = _X(1, 256)
+    with pytest.raises(ValueError, match="not both"):
+        deep_lift_shap(model, X, tracks=[0], target_weights=torch.ones(5), n_shuffles=2)
+    for bad in (torch.ones(4), torch.ones(191, 5), torch.ones(2, 192, 5)):
+        with pytest.raises(ValueError, match="broadcast"):
+            deep_lift_shap(model, X, target_weights=bad, n_shuffles=2)
+    with pytest.raises(ValueError, match="finite"):
+        deep_lift_shap(model, X, target_weights=torch.tensor([1.0, float("nan"), 0, 0, 0]), n_shuffles=2)

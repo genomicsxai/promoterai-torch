@@ -96,8 +96,9 @@ from promoterai_torch.attribution import deep_lift_shap
 attributions = deep_lift_shap(model.to("cuda"), X, n_shuffles=20, random_state=0)
 ```
 
-See [docs/attribution.md](docs/attribution.md) for options, `compile=True`,
-precision on Ampere+ GPUs, and benchmarks.
+See [docs/attribution.md](docs/attribution.md) for the mouse head, custom
+targets (windows, track weights, contrasts), `compile=True`, precision on Ampere+
+GPUs, and benchmarks.
 
 ![SFSWAP DeepLIFTSHAP](https://raw.githubusercontent.com/genomicsxai/promoterai-torch/main/examples/img/deepliftshap.png)
 

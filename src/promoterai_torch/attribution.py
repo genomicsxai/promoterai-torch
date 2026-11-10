@@ -8,7 +8,8 @@ attributions as::
 
 for ``wrapper(x) = model(x.transpose(1, 2))[head][..., tracks].mean()`` per sequence
 (the quantity examples/deepliftshap_region.py attributes when ``tracks`` is all of
-them), without tangermeme's hooks or autograd. Ideas taken from Cherimoya's engine
+them), or for any weighted sum ``(model(x.transpose(1, 2))[head] * target_weights).sum()``
+over the head's output positions and tracks, without tangermeme's hooks or autograd. Ideas taken from Cherimoya's engine
 (cherimoya/_deep_lift_shap_engine.py):
 
 * Joint rows. tangermeme forwards k copies of ``x`` paired with ``r_1..r_k`` (2k
@@ -131,14 +132,30 @@ def _forward(model: PromoterAI, rows: torch.Tensor):
     return z, layers
 
 
-def _head_weights(model, head, tracks, L, dtype, device):
-    """(lo, hi, w): the output crop and per-track weights w (D,) such that the
-    attributed output is the sum over shortcut projections, cropped positions and
-    tracks of w * relu(projection) -- the mean over the selected tracks."""
+def _head_weights(model, head, tracks, L, dtype, device, target_weights=None):
+    """(lo, hi, w): the output crop and weights w, broadcastable to (hi - lo, D), such
+    that the attributed output is the sum over shortcut projections, cropped positions
+    and tracks of w * relu(projection): the mean over the selected tracks, or the
+    target_weights-weighted sum of the head's prediction."""
     out_head = model.output_heads[head]
     crop = out_head.output_crop // 2 if out_head.output_crop > 0 else 0
     lo, hi = crop, L - crop
     D = out_head.projections[0].out_features
+    if target_weights is not None:
+        tw = torch.as_tensor(target_weights).to(dtype)
+        try:
+            ok = tw.ndim <= 2 and torch.broadcast_shapes(tw.shape, (hi - lo, D)) == (hi - lo, D)
+        except RuntimeError:
+            ok = False
+        if not ok:
+            raise ValueError(
+                f"target_weights must broadcast to head {head}'s (output_length, n_tracks) = "
+                f"({hi - lo}, {D}), got shape {tuple(tw.shape)}"
+            )
+        if not torch.isfinite(tw).all():
+            raise ValueError("target_weights must be finite")
+        # The head's prediction is the mean of its projections' ReLUs.
+        return lo, hi, (tw / len(out_head.projections)).to(device)
     idx = torch.arange(D) if tracks is None else torch.as_tensor(tracks, dtype=torch.long).flatten()
     if len(idx) == 0 or int(idx.min()) < -D or int(idx.max()) >= D or len(torch.unique(idx % D)) != len(idx):
         raise ValueError(f"tracks must be distinct indices into head {head}'s {D} tracks")
@@ -379,6 +396,7 @@ def deep_lift_shap(
     *,
     head: int = 0,
     tracks=None,
+    target_weights: torch.Tensor | None = None,
     n_shuffles: int = 20,
     references: torch.Tensor | None = None,
     random_state: int | None = None,
@@ -404,10 +422,19 @@ def deep_lift_shap(
         One-hot sequences, channels first as in tangermeme (``model`` takes
         ``X.transpose(1, 2)``).
     head : int
-        Which output head (species) to attribute.
+        Which output head (species) to attribute. Heads follow the checkpoint's
+        ``species_order`` (``load_pretrained``'s ``args["species_order"]``), e.g.
+        ``args["species_order"].index("mouse")``.
     tracks : int or sequence of int, optional
         Indices into that head's tracks; the attributed output is the mean
         prediction over the head's output window and these tracks (default all).
+    target_weights : tensor, optional
+        Attribute a weighted sum of the head's prediction instead of a mean: the
+        output is ``(prediction * target_weights).sum()`` over the head's output
+        window, with ``target_weights`` broadcastable to (output_length, n_tracks)
+        -- (n_tracks,) weights tracks, (output_length, 1) weights positions (e.g. a
+        window around the TSS), and signed weights give contrasts between tracks or
+        windows. Any normalization is up to the caller. Exclusive with ``tracks``.
     n_shuffles : int
         Number of dinucleotide-shuffled references per sequence; the j-th is drawn
         with seed ``random_state + j``, as tangermeme does (needs tangermeme).
@@ -456,6 +483,8 @@ def deep_lift_shap(
         raise ValueError(f"X must be one-hot (N, 4, L), got shape {tuple(X.shape)}")
     if not 0 <= head < len(model.output_heads):
         raise ValueError(f"head must be in [0, {len(model.output_heads)}), got {head}")
+    if tracks is not None and target_weights is not None:
+        raise ValueError("pass tracks or target_weights, not both")
     if references is not None and (
         references.ndim != 4 or references.shape[0] != X.shape[0] or references.shape[2:] != X.shape[1:]
     ):
@@ -471,7 +500,7 @@ def deep_lift_shap(
     plan_B, plan_k = _plan(model, L, N, K, dtype, device, max_memory, compile)
     k = min(ref_chunk or plan_k, K)
     B = batch_size or (plan_B if k == K else 1)
-    lo, hi, w = _head_weights(model, head, tracks, L, dtype, device)
+    lo, hi, w = _head_weights(model, head, tracks, L, dtype, device, target_weights)
     fns = _passes(compile, device)
     with _recompile_limits(compile):
         return _run(model, X, head, lo, hi, w, references, K, random_state, B, k, fns, device, dtype,

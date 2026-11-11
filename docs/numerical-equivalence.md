@@ -76,9 +76,32 @@ scores. This port and the original TF model produce near equivalent scores, and 
 
 ![SFSWAP scatter](../examples/img/paper_benchmark_concordance.png)
 
+## Scoring speed vs TensorFlow
+
+The first 300 *TERT* promoter SNVs (90 sites), `hg38_finetune`, RTX 3080 10 GB.
+The TensorFlow row is Illumina's own scoring path (`twin_wrap` + `predict` over
+`VariantDataGenerator`, batch size 1, TF 2.21). Times exclude model loading.
+
+| Implementation | Precision | Time | Per variant |
+| --- | --- | --- | --- |
+| TensorFlow `promoterai` | TF32 (TensorFlow default) | 217 s | 0.72 s |
+| `promoterai-torch score --no-incremental` | strict float32 | ~380 s | 1.27 s |
+| `promoterai-torch score --no-incremental` | TF32 (default) | 266 s | 0.89 s |
+| `promoterai-torch score --no-incremental --compile` | TF32 (default) | 246 s (incl. ~8 s compile) | 0.82 s |
+| `promoterai-torch score` (incremental) | strict float32 | ~85 s | 0.29 s |
+| `promoterai-torch score` (incremental) | TF32 (default) | 67 s | 0.22 s |
+
+The GEMMs (70% of a forward) take the same time in both frameworks. Eager
+PyTorch's full passes are ~10% slower per forward because the transposes around
+BatchNorm and the depthwise conv, and the unfused residual adds, are separate
+memory-bound kernels, which TensorFlow avoids by running these ops natively in
+channels-last layout. `--compile` fuses them: 365 vs 360 ms per forward, within ~10% of TensorFlow end to end. On GeForce
+Ampere cards TF32 speeds matmuls up only ~1.4x (TF32 tensor-core throughput is
+close to FP32 there); expect more on an A100 or H100.
+
 ## Equivalence on (subset of) published all-promoter variants dataset
 
-Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the original TF/Keras implementation on *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3003), and *DNAJC9* (*n* = 9009) promoter variants. Scores are identical across all comparisons, including the ensembled scores against the published PromoterAI variant scores (Pearson r = 1.0000, MAE = 0.0000). See `examples/` for details. Note that this repo follows the official PromoterAI and rounds variant scores to 4 decimal places.
+Validated the `hg38_finetune` and `hg38_mm10_finetune` models against the original TF/Keras implementation on *TERT* (*n* = 6,006), *SFSWAP* (*n* = 3003), and *DNAJC9* (*n* = 9009) promoter variants. Scores are identical across all comparisons, including the ensembled scores against the published PromoterAI variant scores (Pearson r = 1.0000, MAE = 0.0000). See `examples/` for details. Note that this repo follows the official PromoterAI and rounds variant scores to 4 decimal places. These comparisons predate the TF32 default and ran in strict float32 (now `--no-tf32`); with TF32, about 1 in 10 scores moves by one rounding step (1e-4; 31 of the first 300 *TERT* variants).
 
 ![TERT scatter](../examples/img/TERT_scatter.png)
 ![SFSWAP scatter](../examples/img/SFSWAP_scatter.png)

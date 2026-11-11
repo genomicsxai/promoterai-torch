@@ -59,8 +59,15 @@ promoterai-torch score \
 Scores in [−1, 1] are written to `variants.{model_name}.tsv` (or `--output`).
 Thresholds: ±0.1 (weak), ±0.2 (moderate), ±0.5 (strong). Substitutions are
 scored incrementally by default: each site's reference runs once and each alt
-recomputes only what its edit can reach, exactly (5x faster on TERT promoter
-SNVs). Indels use full passes; `--no-incremental` forces full passes for all.
+recomputes only what its edit can reach, exactly (4-5x faster on TERT promoter
+SNVs, ~3x faster than the TensorFlow package). Indels use full passes;
+`--no-incremental` forces full passes for all.
+
+Like the original TensorFlow package, `score`, `train` and `finetune` allow TF32
+matmuls and convolutions on Ampere and newer GPUs. Pass `--no-tf32` for strict
+float32: slower, and about 1 in 10 scores moves by one 4-decimal step (1e-4).
+See [docs/numerical-equivalence.md](docs/numerical-equivalence.md#scoring-speed-vs-tensorflow)
+for timings.
 
 ## Predict tracks and extract embeddings
 

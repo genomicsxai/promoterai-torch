@@ -24,6 +24,7 @@ from promoterai_torch.architecture import PromoterAI
 from promoterai_torch.dataset import SequenceDataset, build_weighted_dataloader
 from promoterai_torch.utils import (
     CSVLogger,
+    add_tf32_argument,
     add_wandb_args,
     apply_optimizer_schedule,
     autocast_context,
@@ -35,6 +36,7 @@ from promoterai_torch.utils import (
     resolve_amp_dtype,
     resolve_per_rank_batch_size,
     save_checkpoint,
+    set_tf32,
     setup_distributed,
     unwrap_model,
 )
@@ -526,6 +528,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         help="Log batch-level metrics to W&B every N batches; 0 reuses --log_every_batches "
         "(epoch metrics are always logged when W&B is enabled)",
     )
+    add_tf32_argument(parser)
     add_wandb_args(parser)
     return parser
 
@@ -534,6 +537,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     """Parse args (if not already parsed), build datasets and model, run training loop, save best checkpoint."""
     if args is None:
         args = build_parser().parse_args()
+    set_tf32(getattr(args, "tf32", True))
 
     rank, world_size, device = setup_distributed()
 

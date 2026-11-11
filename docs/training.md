@@ -135,7 +135,9 @@ promoterai-torch finetune \
 ```
 
 Mixed precision is opt-in via `--amp_dtype bf16` or `--amp_dtype fp16`;
-the default is full-precision training. The fine-tuned base model is saved to
+the default is full-precision training. As in TensorFlow, `train` and `finetune`
+allow TF32 matmuls and convolutions on Ampere and newer GPUs by default; pass
+`--no-tf32` for strict float32. The fine-tuned base model is saved to
 `best_model_finetune/best_model.pt`. Only the first output head is trained; all
 other weights are frozen.
 

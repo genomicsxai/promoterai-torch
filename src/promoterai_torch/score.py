@@ -20,7 +20,12 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from promoterai_torch.architecture import TwinModel
 from promoterai_torch.dataset import VariantDataset, collate_variant
 from promoterai_torch.incremental import edit_span, reference_layers, substitution_diffs
-from promoterai_torch.utils import load_pretrained, resolve_input_length
+from promoterai_torch.utils import (
+    add_tf32_argument,
+    load_pretrained,
+    resolve_input_length,
+    set_tf32,
+)
 
 # Alts recomputed together on one cached reference (a site has at most 3 SNVs;
 # MNV sites can have more).
@@ -232,6 +237,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument(
         "--verbose", action="store_true", default=False, help="Show a tqdm progress bar"
     )
+    add_tf32_argument(parser)
     return parser
 
 
@@ -239,6 +245,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     """Score variants (parsing args if not already parsed) and write tanh-scaled scores to a TSV."""
     if args is None:
         args = build_parser().parse_args()
+    set_tf32(getattr(args, "tf32", True))
 
     if args.device:
         device = torch.device(args.device)

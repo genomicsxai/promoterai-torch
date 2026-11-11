@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 
 from promoterai_torch.score import variant_diffs
-from promoterai_torch.utils import DEFAULT_INPUT_LENGTH, load_pretrained
+from promoterai_torch.utils import DEFAULT_INPUT_LENGTH, load_pretrained, set_tf32
 
 BENCHMARK_BASE_URL = (
     "https://raw.githubusercontent.com/Illumina/PromoterAI/master/data/benchmark"
@@ -76,16 +76,21 @@ def score_variants(
     num_workers: int = 4,
     incremental: bool = True,
     verbose: bool = False,
+    tf32: bool | None = None,
 ) -> np.ndarray:
     """Score a variant dataframe with one torch checkpoint and return tanh-scaled scores.
 
     Same-length substitutions are scored incrementally (one cached reference pass
     per site, as `promoterai-torch score` does) unless `incremental` is False;
-    indels always use full ref/alt passes.
+    indels always use full ref/alt passes. A bool `tf32` sets the process-wide
+    TF32 flags first (`set_tf32`; the CLI passes True by default); None leaves
+    them as they are.
     """
     if len(df_var) == 0:
         return np.array([], dtype=np.float32)
 
+    if tf32 is not None:
+        set_tf32(tf32)
     torch_device = torch.device(
         device if device else "cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -158,6 +163,7 @@ def score_benchmark_file(
     num_workers: int = 4,
     incremental: bool = True,
     verbose: bool = False,
+    tf32: bool | None = None,
 ) -> pd.DataFrame:
     """Score one benchmark TSV and add the single-model or ensemble score."""
     df = pd.read_csv(benchmark_tsv, sep="\t")
@@ -176,6 +182,7 @@ def score_benchmark_file(
             num_workers=num_workers,
             incremental=incremental,
             verbose=verbose,
+            tf32=tf32,
         )
     df["score"] = df[score_columns].mean(axis=1)
     return df
@@ -194,6 +201,7 @@ def _score_shard_worker(
     num_workers: int,
     verbose: bool,
     incremental: bool = True,
+    tf32: bool | None = None,
 ) -> None:
     """Score one dataframe shard in a child process and report arrays through a queue."""
     try:
@@ -211,6 +219,7 @@ def _score_shard_worker(
                 num_workers=num_workers,
                 incremental=incremental,
                 verbose=verbose,
+                tf32=tf32,
             )
         queue.put(("ok", result))
     except BaseException as exc:  # noqa: BLE001 - report every worker failure, including SystemExit, through the queue
@@ -229,6 +238,7 @@ def score_benchmark_file_multi_device(
     num_workers: int = 0,
     incremental: bool = True,
     verbose: bool = False,
+    tf32: bool | None = None,
 ) -> pd.DataFrame:
     """Score one benchmark TSV by sharding its variant sites over multiple devices."""
     if not devices:
@@ -245,6 +255,7 @@ def score_benchmark_file_multi_device(
             num_workers=num_workers,
             incremental=incremental,
             verbose=verbose,
+            tf32=tf32,
         )
 
     df = pd.read_csv(benchmark_tsv, sep="\t")
@@ -277,6 +288,7 @@ def score_benchmark_file_multi_device(
                 num_workers,
                 verbose,
                 incremental,
+                tf32,
             ),
         )
         process.start()
@@ -417,6 +429,7 @@ def run_benchmarks(
     datasets: Iterable[str] | None = None,
     incremental: bool = True,
     verbose: bool = False,
+    tf32: bool | None = None,
 ) -> list[dict[str, object]]:
     """Score every downloaded benchmark TSV and write scored TSVs plus metrics."""
     benchmark_dir = Path(benchmark_dir)
@@ -435,6 +448,7 @@ def run_benchmarks(
             "num_workers": num_workers,
             "incremental": incremental,
             "verbose": verbose,
+            "tf32": tf32,
         }
         if resolved_devices is not None:
             scored = score_benchmark_file_multi_device(

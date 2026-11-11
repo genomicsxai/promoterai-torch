@@ -29,7 +29,8 @@ def force_tf_cpu() -> None:
 
     Must be called before TF touches a GPU device at all (including inside
     convert_tf_weights/keras.models.load_model, not just this module's own ops) --
-    call it first thing, before any other TF-touching code runs.
+    call it first thing, before any other TF-touching code runs. Under pytest,
+    tests/conftest.py already hides the GPUs at startup, which makes this a no-op.
 
     Two independent reasons this matters, not just "avoid contending with PyTorch
     for the same GPU's VRAM": tf_keras.layers.DepthwiseConv1D implements dilated

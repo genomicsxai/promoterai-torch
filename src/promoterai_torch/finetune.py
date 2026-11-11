@@ -25,6 +25,7 @@ from promoterai_torch.architecture import TwinModel
 from promoterai_torch.dataset import VariantDataset, collate_variant
 from promoterai_torch.utils import (
     CSVLogger,
+    add_tf32_argument,
     add_wandb_args,
     apply_optimizer_schedule,
     autocast_context,
@@ -37,6 +38,7 @@ from promoterai_torch.utils import (
     resolve_amp_dtype,
     resolve_input_length,
     resolve_per_rank_batch_size,
+    set_tf32,
     setup_distributed,
     unwrap_model,
 )
@@ -360,6 +362,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         default=False,
         help="Resume from the finetune output folder's latest_model.pt when present",
     )
+    add_tf32_argument(parser)
     add_wandb_args(parser)
     return parser
 
@@ -368,6 +371,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     """Parse args (if not already parsed), filter GTEx outlier variants, fine-tune TwinModel, save best base model checkpoint."""
     if args is None:
         args = build_parser().parse_args()
+    set_tf32(getattr(args, "tf32", True))
 
     rank, world_size, device = setup_distributed()
     per_rank_batch_size = resolve_per_rank_batch_size(args.batch_size, world_size)

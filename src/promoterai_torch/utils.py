@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import os
 import tempfile
@@ -10,6 +11,32 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 from torch import nn
+
+
+def set_tf32(enabled: bool) -> None:
+    """Allow (or forbid) TF32 for CUDA matmuls and cuDNN convolutions.
+
+    TensorFlow allows TF32 for both by default on Ampere and newer GPUs, so the
+    original PromoterAI package trains and scores that way; PyTorch allows it only
+    for convolutions. The `score`, `train` and `finetune` commands call this with
+    True unless --no-tf32 is passed, to match. It has no effect on CPUs or on
+    GPUs older than Ampere.
+    """
+    torch.backends.cuda.matmul.allow_tf32 = enabled
+    torch.backends.cudnn.allow_tf32 = enabled
+
+
+def add_tf32_argument(parser: argparse.ArgumentParser) -> None:
+    """Add --tf32/--no-tf32 (default on) to a command's parser; see set_tf32."""
+    parser.add_argument(
+        "--tf32",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow TF32 matmuls and convolutions on Ampere and newer GPUs, as "
+        "TensorFlow (and so the original PromoterAI) does by default; "
+        "--no-tf32 runs strict float32, slower but reproducible to ~1e-7 "
+        "(default: %(default)s)",
+    )
 
 
 def resolve_amp_dtype(amp_dtype: str):

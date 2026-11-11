@@ -5,6 +5,7 @@ import argparse
 import math
 
 from promoterai_torch.benchmark import run_benchmarks
+from promoterai_torch.utils import add_tf32_argument
 
 
 def _fmt(value: object) -> str:
@@ -67,6 +68,7 @@ def main() -> None:
         ),
     )
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
+    add_tf32_argument(parser)
     args = parser.parse_args()
 
     rows = run_benchmarks(
@@ -83,6 +85,7 @@ def main() -> None:
         datasets=args.dataset,
         incremental=args.incremental,
         verbose=args.verbose,
+        tf32=args.tf32,
     )
 
     columns = (

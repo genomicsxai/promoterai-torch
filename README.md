@@ -90,6 +90,15 @@ with torch.no_grad():
 Tracks are arcsinh-scale signal: 498 for the human head (histone marks, TF
 ChIP-seq, ATAC-seq, RNA-seq) and 472 for the mouse head.
 
+Unlike the CLI, the Python API leaves PyTorch's precision flags alone (TF32
+convolutions only), since they're process-wide. To match TensorFlow, which also
+runs matmuls in TF32 on Ampere and newer GPUs, call this once first:
+
+```python
+from promoterai_torch.utils import set_tf32
+set_tf32(True)   # set_tf32(False) for strict float32
+```
+
 ## DeepLIFT/SHAP attribution
 
 With the `interpret` extra, `deep_lift_shap` gives the same attributions as

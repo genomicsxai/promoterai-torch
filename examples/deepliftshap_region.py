@@ -6,14 +6,17 @@ Usage:
         --model_checkpoint models/promoterAI_v1_hg38_mm10_finetune.pt \\
         [--fasta examples/data/hg38.fa] \\
         [--chrom chr12] [--start 131710989] [--end 131711189] \\
-        [--n_shuffles 20] [--species mouse] [--tracks 0 5 7] [--compile] [--device cpu] \\
+        [--n_shuffles 20] [--species mouse] [--tracks 0 5 7] [--compile] [--no-tf32] \\
+        [--device cpu] \\
         [--output examples/img/deepliftshap.png]
 
 The script extracts a full-length input window centered on the specified region,
 runs DeepLIFT/SHAP (promoterai_torch.attribution.deep_lift_shap) on the mean
 prediction of one species head (default the first; --species picks one by name from
 the checkpoint's species_order) over its output window and the chosen tracks
-(default all), and produces a two-panel figure:
+(default all), and produces a two-panel figure. Like the promoterai-torch CLI, it
+allows TF32 matmuls and convolutions on Ampere and newer GPUs (TensorFlow's default);
+--no-tf32 runs strict float32. The figure has two panels:
   - Top: per-position contribution sum across the full input window
   - Bottom: sequence logo (contribution × one-hot) zoomed to the region of interest
 """
@@ -30,7 +33,7 @@ from tangermeme.plot import plot_logo
 
 from promoterai_torch.attribution import deep_lift_shap
 from promoterai_torch.dataset import onehot_encode
-from promoterai_torch.utils import load_pretrained
+from promoterai_torch.utils import add_tf32_argument, load_pretrained, set_tf32
 
 
 def species_head(ckpt_args: dict, species: str | None) -> int:
@@ -89,7 +92,9 @@ def main():
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default="examples/img/deepliftshap.png")
+    add_tf32_argument(parser)
     args = parser.parse_args()
+    set_tf32(args.tf32)
 
     # ── Extract sequence ──────────────────────────────────────────────────────
     center = (args.start + args.end) // 2

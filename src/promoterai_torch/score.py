@@ -220,12 +220,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         "--incremental",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Score same-length substitutions (SNVs/MNVs) by running each site's "
+        help="Score same-length substitutions (SNVs/MNVs; on by default) by running each site's "
         "reference once and recomputing only the receptive-field window each alt "
         "can change (exact up to float rounding; ~4.5x faster on SNV sets with "
         "all three alts per site). Indels always use full passes. "
-        "--no-incremental scores everything with full ref/alt passes "
-        "(default: %(default)s)",
+        "--no-incremental scores everything with full ref/alt passes",
     )
     parser.add_argument(
         "--compile",

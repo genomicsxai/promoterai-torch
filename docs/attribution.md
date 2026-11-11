@@ -97,15 +97,26 @@ torch 2.1.
 On Ampere and newer GPUs, PyTorch runs convolutions in TF32 by default
 (`torch.backends.cudnn.allow_tf32 = True`), so GPU attributions differ from
 tangermeme's by a relative L2 of ~1e-4 (2.7e-4 measured on an RTX 3080). This is
-floating-point noise, not an engine difference, and it matches the original
-TensorFlow model, which also uses TF32 on these GPUs. For an exact comparison, set
-`torch.backends.cudnn.allow_tf32 = False` first; the gap then drops to ~1e-7, at no
-cost in speed (1.7e-6 at the published scale on an A100, where the default gives 3e-4).
+floating-point noise, not an engine difference. For an exact comparison, turn it
+off first; the gap then drops to ~1e-7, at no cost in speed (1.7e-6 at the
+published scale on an A100, where the default gives 3e-4).
 
-Turning TF32 on for matmuls too (`torch.backends.cuda.matmul.allow_tf32 = True`, off
-by default) makes both implementations ~3x faster on an A100, at ~2e-4 relative L2
-from strict float32 on the real hg38 model (~3e-3 on random weights) and convergence
-deltas ~1e-3 instead of ~1e-6: fine for logo plots, not for exact checks.
+TensorFlow, and so the original PromoterAI, also runs matmuls in TF32 by default,
+as do the `promoterai-torch` CLI commands. That makes both implementations ~3x
+faster on an A100 (less on GeForce cards, where TF32 tensor cores are barely
+faster than FP32), at ~2e-4 relative L2 from strict float32 on the real hg38 model
+(~3e-3 on random weights) and convergence deltas ~1e-3 instead of ~1e-6: fine for
+logo plots, not for exact checks. `deep_lift_shap` doesn't change these flags
+itself, since they're process-wide; `set_tf32` sets both:
+
+```python
+from promoterai_torch.utils import set_tf32
+set_tf32(True)    # TensorFlow's default: TF32 matmuls and convolutions
+set_tf32(False)   # strict float32, for comparing against tangermeme
+```
+
+`examples/deepliftshap_region.py` matches the CLI: TF32 on, `--no-tf32` for
+strict float32.
 
 ## Benchmarks
 

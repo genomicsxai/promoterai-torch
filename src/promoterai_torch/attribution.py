@@ -464,11 +464,6 @@ def deep_lift_shap(
         torch.compile needs torch >= 2.6 (eager mode works from 2.1). A step
         whose batch or reference chunk has size 1 compiles separately from larger
         ones (the chunks avoid a lone trailing reference for this reason).
-
-    Precision follows PyTorch's TF32 flags. On Ampere and newer GPUs,
-    ``torch.backends.cuda.matmul.allow_tf32 = True`` (off by default) is ~3x faster at
-    the published scale (A100: 34.9 -> 11.1 s eager, 5.9 s compiled), at ~2e-4 relative
-    L2 from strict float32 and convergence deltas ~1e-3 instead of ~1e-6.
     device : optional
         Defaults to the model's device.
 
@@ -476,6 +471,16 @@ def deep_lift_shap(
     -------
     attributions : tensor (N, 4, L) on the CPU, in the model's dtype
     deltas : tensor (N, n_refs), if ``return_deltas``
+
+    Notes
+    -----
+    Precision follows PyTorch's process-wide TF32 flags, which this function never
+    changes. ``promoterai_torch.utils.set_tf32(True)`` matches TensorFlow's default
+    (TF32 matmuls and convolutions on Ampere and newer GPUs, as the CLI commands
+    use): ~3x faster at the published scale (A100: 34.9 -> 11.1 s eager, 5.9 s
+    compiled), at ~2e-4 relative L2 from strict float32 and convergence deltas ~1e-3
+    instead of ~1e-6. ``set_tf32(False)`` gives strict float32, for comparisons with
+    tangermeme.
     """
     if not isinstance(model, PromoterAI):
         raise TypeError(f"model must be a PromoterAI, got {type(model).__name__}")

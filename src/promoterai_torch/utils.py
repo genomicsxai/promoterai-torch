@@ -32,10 +32,9 @@ def add_tf32_argument(parser: argparse.ArgumentParser) -> None:
         "--tf32",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Allow TF32 matmuls and convolutions on Ampere and newer GPUs, as "
-        "TensorFlow (and so the original PromoterAI) does by default; "
-        "--no-tf32 runs strict float32, slower but reproducible to ~1e-7 "
-        "(default: %(default)s)",
+        help="Allow TF32 matmuls and convolutions on Ampere and newer GPUs (on by "
+        "default, as in TensorFlow and so the original PromoterAI); --no-tf32 runs "
+        "strict float32, slower but reproducible to ~1e-7",
     )
 
 

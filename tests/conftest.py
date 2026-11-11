@@ -3,7 +3,28 @@
 See tests/test_tf_gradient_equivalence_real.py.
 """
 
+import importlib.util
+
 import pytest
+
+
+def pytest_configure(config):
+    """Hide GPUs from TensorFlow before any test touches it.
+
+    Every Keras side in these tests runs on the CPU on purpose (see
+    tests/keras_pytorch_step.py:force_tf_cpu), but TensorFlow only accepts a
+    visible-device change before it initializes, and the first TF op anywhere in
+    the session (building a toy Keras model, or an earlier test such as
+    test_convert) initializes it on the GPU. A later force_tf_cpu() then fails with
+    "Visible devices cannot be modified after being initialized". Hiding the GPUs
+    here, once, keeps that later call a no-op. PyTorch is unaffected. Skipped when
+    TensorFlow isn't installed (the `tf` group), so it costs nothing otherwise.
+    """
+    if importlib.util.find_spec("tensorflow") is None:
+        return
+    import tensorflow as tf
+
+    tf.config.set_visible_devices([], "GPU")
 
 
 def pytest_addoption(parser):

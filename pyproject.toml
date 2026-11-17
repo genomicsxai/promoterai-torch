@@ -48,6 +48,8 @@ dependencies = [
 Homepage = "https://github.com/genomicsxai/promoterai-torch"
 Repository = "https://github.com/genomicsxai/promoterai-torch"
 Issues = "https://github.com/genomicsxai/promoterai-torch/issues"
+Documentation = "https://github.com/genomicsxai/promoterai-torch/tree/main/docs"
+Changelog = "https://github.com/genomicsxai/promoterai-torch/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 train = ["h5py>=3.0", "figwig>=0.2.0"]
@@ -89,6 +91,7 @@ packages = ["src/promoterai_torch"]
 
 [tool.hatch.build.targets.sdist]
 only-include = [
+    "/CHANGELOG.md",
     "/LICENSE",
     "/README.md",
     "/pyproject.toml",
